@@ -1,0 +1,49 @@
+import arcpy
+
+sde = r"\\metanoia\GeoData\ESRI\ArcSDE_connections\Connection to GISPRDDB direct connect.sde"  
+fc = f"{sde_connection}\\cvGIS.CITY.parcel_area"
+exclude_fc = f"{sde_connection}\\cvGIS.CITY.structure_existing_area"
+
+zones = ["IX-5", "IX-8", "CV", "CM"]
+where_clause = "ZONE IN ({})".format(",".join(f"'{z}'" for z in zones))
+
+#sq ft to acres
+SQFT_TO_ACRES = 1 / 43560
+SQM_TO_ACRES = 1 / 4046.8564224
+
+if "Foot" in units:
+    conversion = SQFT_TO_ACRES
+elif "Meter" in units:
+    conversion = SQM_TO_ACRES
+else:
+    print("Unrecognized units")
+    conversion = 1
+#build feature layer of parcels
+arcpy.management.MakeFeatureLayer(feature_class, "parcel_lyr", where_clause)
+
+#select parcels that intersect with strucutres
+arcpy.management.SelectLayerByLocation(
+    "parcel_lyr", "INTERSECT", exclude_fc, selection_type="NEW_SELECTION"
+)
+
+arcpy.management.SelectLayerByLocation(
+    "parcel_lyr", "INTERSECT", exclude_fc, selection_type="SWITCH_SELECTION"
+)
+
+arcpy.management.CopyFeatures("parcel_lyr", "in_memory\\potential_sites")
+arcpy.management.Delete("parcel_lyr")
+arcpy.management.MakeFeatureLayer("in_memory\\potential_sites", "parcel_lyr")
+
+fields = ["ZONE", "SHAPE@AREA", "PIN"]
+
+with arcpy.da.SearchCursor(fc, fields, where_clause) as cursor:
+    total_acres = 0
+    count = 0
+    for zone, shape_area, pin in cursor:
+        acres = shape_area * conversion
+        total_acres += acres
+        count += 1
+        print(f"Pin {pin} | Zone: {zone} | Area: {acres:.3f} acres")
+
+    print(f"\nTotal features: {count}")
+    #arcpy.management.Delete("parcel_lyr")
