@@ -1,0 +1,15 @@
+import arcpy
+
+sde = r"\\metanoia\GeoData\ESRI\ArcSDE_connections\Connection to GISPRDDB direct connect.sde"
+fc = rf"{sde}\cvGIS.CITY.parcel_area"
+field = "ZONE"
+
+values = set()
+
+with arcpy.da.SearchCursor(fc, [field]) as cursor:
+    for row in cursor:
+        if row[0] is not None:
+            values.add(row[0])
+
+for value in sorted(values):
+    print(value)
