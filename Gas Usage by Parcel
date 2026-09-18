@@ -1,0 +1,222 @@
+# parcel_gas_usage_map.py
+#
+# 1. Spatially joins gas meters to parcels (each meter gets its parcel PIN).
+# 2. Aggregates JUL_26 and JAN_26 consumption + meter count PER PARCEL
+#    (intermediate stats table only - not the final deliverable).
+# 3. Joins those aggregates onto a copy of ParcelArea_GasUsage (which already
+#    carries ZONE and all other native parcel fields along with it), producing
+#    the ACTUAL parcel polygon feature class with new usage fields added.
+#    ** This feature class (Parcels_GasUsage) is the output you want to add
+#       to your map - not the Parcel_Meter_Summary table from step 2. **
+# 4. Flags parcels with more than one meter (e.g. apartment buildings).
+# 5. Optionally applies graduated color renderers (light -> dark blue) for
+#    TOTAL_JUL_26 and TOTAL_JAN_26 as two separate layers, so you can build
+#    a high-consumption-season map and a low-consumption-season map.
+
+import arcpy
+import os
+import sys
+
+# ---------------------------------------------------------------------------
+# CONFIG - edit for your environment
+# ---------------------------------------------------------------------------
+
+GAS_METERS_GDB = r"\\metanoia\GeoData\DepartmentOfUtilities\Simpson_A\Projects\ASimpson_Editing\ASimpson_Editing\ASimpson_Editing.gdb"
+GAS_METERS_FC = os.path.join(GAS_METERS_GDB, "GasMeters_082526_WithConsumption")
+
+# Consumption fields on the meters layer (Long/Numeric). Each will be summed
+# per parcel separately, so you get one total per period.
+CONSUMPTION_FIELDS = ["JUL_26", "JAN_26"]
+
+# Parcel source now comes from the editing gdb instead of the SDE connection.
+PARCEL_FC = os.path.join(GAS_METERS_GDB, "ParcelArea_GasUsage")
+
+# Parcel unique ID field - confirm this still matches the field name in
+# ParcelArea_GasUsage (e.g. it might be "PIN", "APN", "PARCEL_PIN", etc).
+PARCEL_ID_FIELD = "PIN"
+
+# Output workspace/gdb
+OUTPUT_GDB = GAS_METERS_GDB
+METERS_WITH_PIN = os.path.join(OUTPUT_GDB, "Meters_With_PIN")
+PARCEL_SUMMARY_TABLE = os.path.join(OUTPUT_GDB, "Parcel_Meter_Summary")  # intermediate only
+OUTPUT_PARCELS_FC = os.path.join(OUTPUT_GDB, "Parcels_GasUsage")  # <-- this is the real deliverable
+
+MULTI_METER_THRESHOLD = 2  # flag parcels with meter_count >= this value
+
+# --- Optional: apply symbology directly (requires an open/known .aprx) -----
+APPLY_SYMBOLOGY = False
+APRX_PATH = r"C:\path\to\your\project.aprx"
+MAP_NAME = "Map"
+
+# One output layer per consumption field, e.g.:
+#   TOTAL_JUL_26 -> Parcels_GasUsage_TOTAL_JUL_26 (high season)
+#   TOTAL_JAN_26 -> Parcels_GasUsage_TOTAL_JAN_26 (low season)
+SYMBOLOGY_FIELDS = ["TOTAL_JUL_26", "TOTAL_JAN_26"]
+
+
+def check_field_exists(fc, field_name, label):
+    """Fail loudly (instead of letting JoinField silently no-op or error
+    deep into the script) if the ID field isn't actually on this FC."""
+    names = {f.name for f in arcpy.ListFields(fc)}
+    if field_name not in names:
+        sys.exit(
+            "ERROR: Field '{0}' not found on {1} ({2}).\n"
+            "Available fields: {3}".format(
+                field_name, label, fc, ", ".join(sorted(names))
+            )
+        )
+
+
+def step1_join_meters_to_parcels():
+    # Attach PIN (and nothing else) to each meter point.
+    print("Step 1: Spatially joining meters to parcels...")
+
+    fms = arcpy.FieldMappings()
+    fms.addTable(GAS_METERS_FC)
+    fms.addTable(PARCEL_FC)
+
+    # Keep only PIN from the parcel side - we don't need ZONE here since
+    # it's already native to ParcelArea_GasUsage and will ride along in Step 3.
+    join_field_names = {f.name for f in arcpy.ListFields(PARCEL_FC)}
+    for fname in list(join_field_names):
+        if fname != PARCEL_ID_FIELD:
+            idx = fms.findFieldMapIndex(fname)
+            if idx >= 0:
+                fms.removeFieldMap(idx)
+
+    arcpy.analysis.SpatialJoin(
+        target_features=GAS_METERS_FC,
+        join_features=PARCEL_FC,
+        out_feature_class=METERS_WITH_PIN,
+        join_operation="JOIN_ONE_TO_ONE",
+        join_type="KEEP_ALL",
+        field_mapping=fms,
+        match_option="INTERSECT",
+    )
+    print("  -> " + METERS_WITH_PIN)
+
+
+def step2_summarize_by_parcel():
+    # Sum JUL_26 and JAN_26, and count meters, per parcel (PIN).
+    # NOTE: this table is an intermediate product consumed by step 3 below.
+    # It is not the feature class you want to map.
+    print("Step 2: Summarizing consumption + meter count per parcel...")
+
+    stats_fields = [[f, "SUM"] for f in CONSUMPTION_FIELDS]
+    # OBJECTID always exists and is never null, so COUNT on it gives an
+    # accurate meter-per-parcel count regardless of null consumption values.
+    stats_fields.append(["OBJECTID", "COUNT"])
+
+    arcpy.analysis.Statistics(
+        in_table=METERS_WITH_PIN,
+        out_table=PARCEL_SUMMARY_TABLE,
+        statistics_fields=stats_fields,
+        case_field=PARCEL_ID_FIELD,
+    )
+    print("  -> " + PARCEL_SUMMARY_TABLE + " (intermediate table only)")
+
+
+def step3_join_summary_to_parcels():
+    # Copy ParcelArea_GasUsage locally (ZONE comes along natively) and join
+    # stats on. This is what produces the actual parcel polygons with the
+    # new usage fields attached.
+    print("Step 3: Joining summary stats onto parcel polygons...")
+
+    arcpy.management.CopyFeatures(PARCEL_FC, OUTPUT_PARCELS_FC)
+
+    sum_fields = ["SUM_" + f for f in CONSUMPTION_FIELDS]
+    count_field = "COUNT_OBJECTID"
+
+    arcpy.management.JoinField(
+        in_data=OUTPUT_PARCELS_FC,
+        in_field=PARCEL_ID_FIELD,
+        join_table=PARCEL_SUMMARY_TABLE,
+        join_field=PARCEL_ID_FIELD,
+        fields=sum_fields + [count_field],
+    )
+
+    # Add friendly renamed fields + multi-meter flag
+    total_field_names = ["TOTAL_" + f for f in CONSUMPTION_FIELDS]
+    for tf in total_field_names:
+        arcpy.management.AddField(OUTPUT_PARCELS_FC, tf, "DOUBLE")
+    arcpy.management.AddField(OUTPUT_PARCELS_FC, "METER_COUNT", "LONG")
+    arcpy.management.AddField(OUTPUT_PARCELS_FC, "MULTI_METER", "TEXT", field_length=3)
+
+    cursor_fields = sum_fields + [count_field] + total_field_names + ["METER_COUNT", "MULTI_METER"]
+    with arcpy.da.UpdateCursor(OUTPUT_PARCELS_FC, cursor_fields) as cursor:
+        n_sums = len(sum_fields)
+        for row in cursor:
+            raw_sums = row[0:n_sums]
+            meter_count = row[n_sums]
+            for i in range(n_sums):
+                row[n_sums + 1 + i] = raw_sums[i] if raw_sums[i] is not None else 0
+            row[n_sums + 1 + n_sums] = meter_count if meter_count is not None else 0
+            row[n_sums + 1 + n_sums + 1] = "YES" if (meter_count or 0) >= MULTI_METER_THRESHOLD else "NO"
+            cursor.updateRow(row)
+
+    # Drop the raw stats fields now that we have friendly copies
+    arcpy.management.DeleteField(OUTPUT_PARCELS_FC, sum_fields + [count_field])
+
+    print("  -> " + OUTPUT_PARCELS_FC)
+    print("     Fields added: " + ", ".join(total_field_names) + ", METER_COUNT, MULTI_METER")
+    print("     ZONE and all other native ParcelArea_GasUsage fields carried through automatically.")
+    print("     *** This feature class is the actual parcel layer w/ usage - add THIS to your map. ***")
+
+
+#def step4_apply_symbology():
+#    # Add one graduated-color layer per consumption field (light -> dark blue).
+#    print("Step 4: Applying graduated color symbology...")
+#
+#    aprx = arcpy.mp.ArcGISProject(APRX_PATH)
+#    m = aprx.listMaps(MAP_NAME)[0]
+#
+#    for field in SYMBOLOGY_FIELDS:
+#        lyr = m.addDataFromPath(OUTPUT_PARCELS_FC)
+#        lyr.name = "Parcels_GasUsage_" + field
+#
+#        sym = lyr.symbology
+#        sym.updateRenderer("GraduatedColorsRenderer")
+#        sym.renderer.classificationField = field
+#        sym.renderer.breakCount = 5
+#        sym.renderer.colorRamp = aprx.listColorRamps("Blues")[0]
+#
+#        lyr.symbology = sym
+#        print("  -> Layer '" + lyr.name + "' symbolized by " + field)
+#
+#    aprx.save()
+
+
+def main():
+    arcpy.env.overwriteOutput = True
+
+    if not arcpy.Exists(GAS_METERS_FC):
+        sys.exit("ERROR: Gas meters FC not found: " + GAS_METERS_FC)
+    if not arcpy.Exists(PARCEL_FC):
+        sys.exit("ERROR: Parcel FC not found: " + PARCEL_FC)
+
+    # Validate the ID field exists on the parcel source BEFORE running
+    # anything - this is the most likely reason step 3 would have silently
+    # failed and left you with only the Parcel_Meter_Summary table.
+    # (Note: PIN does NOT exist on the gas meters FC yet - it only shows up
+    # there after step 1's spatial join pulls it in from the parcel layer,
+    # so we don't check for it there.)
+    check_field_exists(PARCEL_FC, PARCEL_ID_FIELD, "parcel FC (ParcelArea_GasUsage)")
+
+    step1_join_meters_to_parcels()
+    step2_summarize_by_parcel()
+    step3_join_summary_to_parcels()
+
+    if APPLY_SYMBOLOGY:
+        step4_apply_symbology()
+    else:
+        print("")
+        print("Symbology step skipped (APPLY_SYMBOLOGY=False).")
+        print("Add Parcels_GasUsage to your map twice, symbolize one copy by")
+        print("TOTAL_JUL_26 and the other by TOTAL_JAN_26 (Graduated Colors,")
+        print("Blues color scheme), or set APPLY_SYMBOLOGY=True above.")
+
+    print("")
+    print("Done. Final output feature class: " + OUTPUT_PARCELS_FC)
+
+
+main()
