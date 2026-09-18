@@ -1,0 +1,114 @@
+import os
+import arcpy
+import zipfile
+import paramiko
+import shutil
+import time
+from datetime import datetime
+#ADD ZIPPED FILES TO SFTP
+def copy_zip_files_to_sftp(local_folder, sftp_host, sftp_port, sftp_username, sftp_password, sftp_remote_folder):
+    # Establish an SFTP connection
+    try:
+        # Initialize SSHClient and set missing host key policy
+        transport = paramiko.Transport((sftp_host, sftp_port))
+        transport.connect(username=sftp_username, password=sftp_password)
+        
+        # Create an SFTP session
+        sftp = paramiko.SFTPClient.from_transport(transport)
+
+        # List all files in the local folder
+        for file_name in os.listdir(local_folder):
+            # Check if the file is a .zip file
+            if file_name.endswith(".zip"):
+                local_file_path = os.path.join(local_folder, file_name)
+                remote_file_path = os.path.join(sftp_remote_folder, file_name)
+
+                # Upload the file to the remote SFTP server
+#                 print(f"Copying {file_name} to SFTP server...")
+                sftp.put(local_file_path, remote_file_path)
+                print(f"Successfully copied {file_name} to {remote_file_path}")
+
+        # Close the SFTP session and the transport
+        sftp.close()
+        transport.close()
+        print("All files copied successfully.")
+    
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+#DOWNLOAD FROM SFTP
+def download_most_recent_zip(sftp_host, sftp_port, sftp_username, sftp_password, sftp_remote_folder, local_download_folder, prefix="ACSA_Water"):
+    # Establish an SFTP connection
+    try:
+        # Initialize SSHClient and set missing host key policy
+        transport = paramiko.Transport((sftp_host, sftp_port))
+        transport.connect(username=sftp_username, password=sftp_password)
+        
+        # Create an SFTP session
+        sftp = paramiko.SFTPClient.from_transport(transport)
+
+        # List files in the remote directory
+        remote_files = sftp.listdir_attr(sftp_remote_folder)
+        
+        # Filter files that start with the specified prefix and end with .zip
+        matching_files = [file for file in remote_files if file.filename.startswith(prefix) and file.filename.endswith(".zip")]
+        
+        if not matching_files:
+            print(f"No zip files found that start with {prefix}.")
+            sftp.close()
+            transport.close()
+            return None
+        
+        # Sort the files by modification time (newest first)
+        most_recent_file = max(matching_files, key=lambda file: file.st_mtime)
+        
+        remote_file_path = os.path.join(sftp_remote_folder, most_recent_file.filename)
+        local_file_path = os.path.join(local_download_folder, most_recent_file.filename)
+        
+        # Download the most recent file
+#         print(f"Downloading {most_recent_file.filename} to {local_file_path}...")
+        sftp.get(remote_file_path, local_file_path)
+        print(f"Download complete: {most_recent_file.filename}")
+        
+        # Close the SFTP session and transport
+        sftp.close()
+        transport.close()
+        
+        return local_file_path
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+
+
+    
+
+# vars
+sftp_host = "acsadev.com"  # SFTP host address
+sftp_port = 22  # Default SFTP port
+sftp_username = "Charlottesville"  # SFTP username
+sftp_password = "Apr2$753Base"  # SFTP password
+sftp_remote_folder = "/GIS/City"  # remote folder on SFTP server
+ACSA_folder = "/GIS/ACSA"
+RWSA_folder = "/GIS/RWSA"
+UVA_folder = "/GIS/UVA"
+local_download_folder = r"\\metanoia\GeoData\DepartmentOfUtilities\RegionalUtilities"
+
+
+# zip the geodatabases
+zip_geodatabases(new_folder)
+
+# Upload our files
+copy_zip_files_to_sftp(new_folder, sftp_host, sftp_port, sftp_username, sftp_password, sftp_remote_folder)
+
+#Download files
+download_most_recent_zip(sftp_host, sftp_port, sftp_username, sftp_password, ACSA_folder, local_download_folder, "ACSA_Water")
+
+download_most_recent_zip(sftp_host, sftp_port, sftp_username, sftp_password, ACSA_folder, local_download_folder, "ACSA_Sanitary")
+
+download_most_recent_zip(sftp_host, sftp_port, sftp_username, sftp_password, RWSA_folder, local_download_folder, "RWSA")
+
+download_most_recent_zip(sftp_host, sftp_port, sftp_username, sftp_password, UVA_folder, local_download_folder, "UVA_Utilities")
+
+
+print("-------DONE-------")
