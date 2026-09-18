@@ -1,0 +1,212 @@
+import os
+import arcpy
+import zipfile
+import paramiko
+import shutil
+import time
+from datetime import datetime
+
+#where you want to store other utilities downloaded from SFTP
+local_download_folder = r"\\metanoia\GeoData\DepartmentOfUtilities\RegionalUtilities"  # Replace with your local folder for download
+
+current_date = datetime.now().strftime("%Y%m%d")
+str_current_datetime = str(current_date)
+fold = "Export_"
+export_fold = fold + str_current_datetime
+new_folder = os.path.join(r"\\metanoia\geodata\DepartmentOfUtilities\ACSA Exporter\Output_GDBs",export_fold)
+
+###############################################################################################################################
+###############################################################################################################################
+
+# Check if the folder exists, and if not, create it
+if not os.path.exists(new_folder):
+    os.makedirs(new_folder)
+# Define a list of first letters for the geodatabase names
+letters = ["Cville_Utilities_Gas_", "Cville_Utilities_Sanitary_", "Cville_Utilities_Storm_", "Cville_Utilities_Water_"]
+# Loop through each letter and create a geodatabase with the current date
+for letter in letters:
+    gdb_name = f"{letter}{current_date}.gdb"
+    gdb_path = os.path.join(new_folder, gdb_name)
+
+    if not arcpy.Exists(gdb_path):
+        arcpy.CreateFileGDB_management(new_folder, gdb_name)
+        print(f"Created geodatabase: {gdb_name}")
+    else:
+        print(f"Geodatabase {gdb_name} already exists.")
+
+###############################################################################################################################
+###############################################################################################################################                       
+#GAS
+gas_gdb = "Cville_Utilities_Gas_"+current_date+".gdb"
+full_p_gas = os.path.join(new_folder,gas_gdb)
+
+#main_line
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="cvGIS.CITY.gas_main_line",
+        out_features=os.path.join(full_p_gas,"gas_main_line"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='MAIN_SEG_ID "MAIN_SEG_ID" true true false 20 Text 0 0,First,#,cvGIS.CITY.gas_main_line,MAIN_SEG_ID,0,19;LINETYPE "LINETYPE" true true false 25 Text 0 0,First,#,cvGIS.CITY.gas_main_line,LINETYPE,0,24;PIPE_SIZE "PIPE_SIZE" true true false 10 Text 0 0,First,#,cvGIS.CITY.gas_main_line,PIPE_SIZE,0,9;STATUS "STATUS" true true false 10 Text 0 0,First,#,cvGIS.CITY.gas_main_line,STATUS,0,9',
+        sort_field=None
+    )
+#service_line
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="cvGIS.CITY.gas_service_line",
+        out_features=os.path.join(full_p_gas,"gas_service_line"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='SVC_SEG_ID "SVC_SEG_ID" true true false 20 Text 0 0,First,#,cvGIS.CITY.gas_service_line,SVC_SEG_ID,0,19;LINETYPE "LINETYPE" true true false 25 Text 0 0,First,#,cvGIS.CITY.gas_service_line,LINETYPE,0,24;PIPE_SIZE "PIPE_SIZE" true true false 10 Text 0 0,First,#,cvGIS.CITY.gas_service_line,PIPE_SIZE,0,9;STATUS "STATUS" true true false 10 Text 0 0,First,#,cvGIS.CITY.gas_service_line,STATUS,0,9',
+        sort_field=None
+    )
+# #meter_point
+# with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+#     arcpy.conversion.ExportFeatures(
+#         in_features="cvGIS.CITY.gas_meter_point",
+#         out_features=os.path.join(full_p_gas,"gas_meter_point"),
+#         where_clause="",
+#         use_field_alias_as_name="NOT_USE_ALIAS",
+#         field_mapping='ADDRESS "ADDRESS" true true false 100 Text 0 0,First,#,cvgis.CITY.gas_meter_point,ADDRESS,0,99',
+#         sort_field=None
+#     )
+    
+###############################################################################################################################
+#SANITARY
+sanitary_gdb = "Cville_Utilities_Sanitary_"+current_date+".gdb"
+full_p_sanitary = os.path.join(new_folder,sanitary_gdb)
+#main_line
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="sde_Sanitary Main Line",
+        out_features=os.path.join(full_p_sanitary,"sanitary_main_line"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='AssetID "Pipe ID" true true false 30 Text 0 0,First,#,sde_Sanitary Main Line,AssetID,0,29;UpstreamMH "Upstream Manhole" true true false 30 Text 0 0,First,#,sde_Sanitary Main Line,UpstreamMH,0,29;DownstreamMH "Downstream Manhole" true true false 30 Text 0 0,First,#,sde_Sanitary Main Line,DownstreamMH,0,29;Diameter "Diameter" true true false 10 Text 0 0,First,#,sde_Sanitary Main Line,Diameter,0,9;Material "Material" true true false 35 Text 0 0,First,#,sde_Sanitary Main Line,Material,0,34;InstallDate "Install Date" true true false 8 Date 0 0,First,#,sde_Sanitary Main Line,InstallDate,-1,-1;AcceptanceDate "Acceptance Date" true true false 8 Date 0 0,First,#,sde_Sanitary Main Line,AcceptanceDate,-1,-1;ServiceCount "Services" true true false 2 Short 0 5,First,#,sde_Sanitary Main Line,ServiceCount,-1,-1;DepthIn "Depth In" true true false 8 Double 8 38,First,#,sde_Sanitary Main Line,DepthIn,-1,-1;DepthOut "Depth Out" true true false 8 Double 8 38,First,#,sde_Sanitary Main Line,DepthOut,-1,-1;InvertINElevation "Invert In Elevation" true true false 8 Double 8 38,First,#,sde_Sanitary Main Line,InvertINElevation,-1,-1;InvertOUTElevation "Invert Out Elevation" true true false 8 Double 8 38,First,#,sde_Sanitary Main Line,InvertOUTElevation,-1,-1;SlopeApproximate "Approximate Slope" true true false 8 Double 8 38,First,#,sde_Sanitary Main Line,SlopeApproximate,-1,-1;CCTVStatus "CCTV" true true false 20 Text 0 0,First,#,sde_Sanitary Main Line,CCTVStatus,0,19;CIPPLined "CIPP Lined" true true false 5 Text 0 0,First,#,sde_Sanitary Main Line,CIPPLined,0,4;PointRepair "Point Repair" true true false 5 Text 0 0,First,#,sde_Sanitary Main Line,PointRepair,0,4;LineName "Line Name" true true false 50 Text 0 0,First,#,sde_Sanitary Main Line,LineName,0,49;Comment "Comments" true true false 150 Text 0 0,First,#,sde_Sanitary Main Line,Comment,0,149;UpstreamMHRimElevation "Upstream Manhole Rim Elevation" true true false 8 Double 8 38,First,#,sde_Sanitary Main Line,UpstreamMHRimElevation,-1,-1;DownstreamMHRimElevation "Downstream Manhole Rim Elevation" true true false 8 Double 8 38,First,#,sde_Sanitary Main Line,DownstreamMHRimElevation,-1,-1;Owner "Owner" true true false 10 Text 0 0,First,#,sde_Sanitary Main Line,Owner,0,9;Status "Status" true true false 10 Text 0 0,First,#,sde_Sanitary Main Line,Status,0,9;SAPEquipmentID "SAP Equipment ID" true true false 12 Text 0 0,First,#,sde_Sanitary Main Line,SAPEquipmentID,0,11;Fall "Fall" true true false 8 Double 8 38,First,#,sde_Sanitary Main Line,Fall,-1,-1;Assignment "Assignment" true true false 50 Text 0 0,First,#,sde_Sanitary Main Line,Assignment,0,49;created_user "created_user" false true false 255 Text 0 0,First,#,sde_Sanitary Main Line,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,sde_Sanitary Main Line,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,sde_Sanitary Main Line,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,sde_Sanitary Main Line,last_edited_date,-1,-1;LastCCTVDate "Latest CCTV Date" true true false 8 Date 0 0,First,#,sde_Sanitary Main Line,LastCCTVDate,-1,-1;LastFlushDate "Last Flush Date" true true false 8 Date 0 0,First,#,sde_Sanitary Main Line,LastFlushDate,-1,-1;InspectionDate "InspectionDate" true true false 8 Date 0 0,First,#,sde_Sanitary Main Line,InspectionDate,-1,-1;Report_Status "Report_Status" true true false 50 Text 0 0,First,#,sde_Sanitary Main Line,Report_Status,0,49;Attach_Folder "Attach_Folder" true true false 100 Text 0 0,First,#,sde_Sanitary Main Line,Attach_Folder,0,99;Contract_Assignment "Contract_Assignment" true true false 75 Text 0 0,First,#,sde_Sanitary Main Line,Contract_Assignment,0,74;Contract_Status "Contract_Status" true true false 75 Text 0 0,First,#,sde_Sanitary Main Line,Contract_Status,0,74',
+        sort_field=None
+    )
+#manhole_point
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="sde_Sanitary Manhole",
+        out_features=os.path.join(full_p_sanitary,"sanitary_manhole_point"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='Asset_ID "Manhole ID" true true false 20 Text 0 0,First,#,sde_Sanitary Manhole,Asset_ID,0,19;ManholeMaterial "Manhole Material" true true false 25 Text 0 0,First,#,sde_Sanitary Manhole,ManholeMaterial,0,24;RimElevation "Rim Elevation" true true false 8 Double 8 38,First,#,sde_Sanitary Manhole,RimElevation,-1,-1;HorizontalGPSDate "Horizontal GPS Date" true true false 8 Date 0 0,First,#,sde_Sanitary Manhole,HorizontalGPSDate,-1,-1;DataSource "Data Source" true true false 10 Text 0 0,First,#,sde_Sanitary Manhole,DataSource,0,9;ManholeDepth "Manhole Depth" true true false 8 Double 8 38,First,#,sde_Sanitary Manhole,ManholeDepth,-1,-1;InstallDate "Install Date" true true false 8 Date 0 0,First,#,sde_Sanitary Manhole,InstallDate,-1,-1;ConditionDescription "Condition Description" true true false 10 Text 0 0,First,#,sde_Sanitary Manhole,ConditionDescription,0,9;ServiceCount "Service Count" true true false 2 Short 0 5,First,#,sde_Sanitary Manhole,ServiceCount,-1,-1;SAP_Equipment_ID "SAP Equipment ID" true true false 10 Text 0 0,First,#,sde_Sanitary Manhole,SAP_Equipment_ID,0,9;FrameAndCoverType "Frame and Cover Type" true true false 25 Text 0 0,First,#,sde_Sanitary Manhole,FrameAndCoverType,0,24;DropConnection "Drop Connection" true true false 10 Text 0 0,First,#,sde_Sanitary Manhole,DropConnection,0,9;PavedArea "Paved Area" true true false 10 Text 0 0,First,#,sde_Sanitary Manhole,PavedArea,0,9;RelativeElevation "Relative Elevation" true true false 10 Text 0 0,First,#,sde_Sanitary Manhole,RelativeElevation,0,9;EasementStatus "Easement Status" true true false 10 Text 0 0,First,#,sde_Sanitary Manhole,EasementStatus,0,9;Steps "Steps" true true false 10 Text 0 0,First,#,sde_Sanitary Manhole,Steps,0,9;Comments "Comments" true true false 150 Text 0 0,First,#,sde_Sanitary Manhole,Comments,0,149;InflowDish "Inflow Dish" true true false 10 Text 0 0,First,#,sde_Sanitary Manhole,InflowDish,0,9;Owner "Owner" true true false 5 Text 0 0,First,#,sde_Sanitary Manhole,Owner,0,4;Status "Status" true true false 20 Text 0 0,First,#,sde_Sanitary Manhole,Status,0,19;created_user "created_user" false true false 255 Text 0 0,First,#,sde_Sanitary Manhole,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,sde_Sanitary Manhole,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,sde_Sanitary Manhole,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,sde_Sanitary Manhole,last_edited_date,-1,-1;RehabDate "Rehab Date" true true false 8 Date 0 0,First,#,sde_Sanitary Manhole,RehabDate,-1,-1;RehabType "RehabType" true true false 50 Text 0 0,First,#,sde_Sanitary Manhole,RehabType,0,49;FrameAndCoverReplaceDate "FrameAndCoverReplaceDate" true true false 8 Date 0 0,First,#,sde_Sanitary Manhole,FrameAndCoverReplaceDate,-1,-1;RehabContractor "Rehab Contractor" true true false 50 Text 0 0,First,#,sde_Sanitary Manhole,RehabContractor,0,49;AcceptanceDate "Acceptance Date" true true false 8 Date 0 0,First,#,sde_Sanitary Manhole,AcceptanceDate,-1,-1;InspectionDate "Inspection Date" true true false 8 Date 0 0,First,#,sde_Sanitary Manhole,InspectionDate,-1,-1;Contract_Assignment "Contract_Assignment" true true false 75 Text 0 0,First,#,sde_Sanitary Manhole,Contract_Assignment,0,74;Contract_Status "Contract_Status" true true false 75 Text 0 0,First,#,sde_Sanitary Manhole,Contract_Status,0,74',
+        sort_field=None
+    )
+#lateral line
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="Sanitary Lateral Line",
+        out_features=os.path.join(full_p_sanitary,"sanitary_lateral_line"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='ConnectionType "Connection Type" true true false 25 Text 0 0,First,#,Sanitary Lateral Line,ConnectionType,0,24;DataSourceDate "Data Source Date" true true false 8 Date 0 0,First,#,Sanitary Lateral Line,DataSourceDate,-1,-1;PositionDirection "Position Direction" true true false 20 Text 0 0,First,#,Sanitary Lateral Line,PositionDirection,0,19;Diameter "Diameter" true true false 10 Text 0 0,First,#,Sanitary Lateral Line,Diameter,0,9;Material "Material" true true false 20 Text 0 0,First,#,Sanitary Lateral Line,Material,0,19;AssumedAddress "Assumed Address" true true false 75 Text 0 0,First,#,Sanitary Lateral Line,AssumedAddress,0,74;DataSource "Data Source" true true false 25 Text 0 0,First,#,Sanitary Lateral Line,DataSource,0,24;Comments "Comments" true true false 150 Text 0 0,First,#,Sanitary Lateral Line,Comments,0,149;created_user "created_user" false true false 255 Text 0 0,First,#,Sanitary Lateral Line,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,Sanitary Lateral Line,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,Sanitary Lateral Line,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,Sanitary Lateral Line,last_edited_date,-1,-1;InspectionDate "InspectionDate" true true false 8 Date 0 0,First,#,Sanitary Lateral Line,InspectionDate,-1,-1',
+        sort_field=None
+    )
+###############################################################################################################################    
+#STORM
+storm_gdb = "Cville_Utilities_Storm_"+current_date+".gdb"
+full_p_storm = os.path.join(new_folder,storm_gdb)
+#pipe_line
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportTable(
+        in_table="sde_Storm Pipe",
+        out_table=os.path.join(full_p_storm,"storm_pipe_line"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='PipeID "Pipe ID" true true false 40 Text 0 0,First,#,sde_Storm Pipe,PipeID,0,39;Type "Type" true true false 10 Text 0 0,First,#,sde_Storm Pipe,Type,0,9;Owner "Owner" true true false 20 Text 0 0,First,#,sde_Storm Pipe,Owner,0,19;Easement "Easement" true true false 3 Text 0 0,First,#,sde_Storm Pipe,Easement,0,2;Status "Status" true true false 4 Text 0 0,First,#,sde_Storm Pipe,Status,0,3;Size "Size" true true false 20 Text 0 0,First,#,sde_Storm Pipe,Size,0,19;TopWidth "Top Width" true true false 8 Double 8 38,First,#,sde_Storm Pipe,TopWidth,-1,-1;Material "Material" true true false 20 Text 0 0,First,#,sde_Storm Pipe,Material,0,19;DepthIn "Depth In" true true false 8 Double 8 38,First,#,sde_Storm Pipe,DepthIn,-1,-1;DepthOut "Depth Out" true true false 8 Double 8 38,First,#,sde_Storm Pipe,DepthOut,-1,-1;InvertIn "Invert In" true true false 8 Double 8 38,First,#,sde_Storm Pipe,InvertIn,-1,-1;InvertOut "Invert Out" true true false 8 Double 8 38,First,#,sde_Storm Pipe,InvertOut,-1,-1;ZSource "Z Source" true true false 20 Text 0 0,First,#,sde_Storm Pipe,ZSource,0,19;ZDate "Z Date" true true false 8 Date 0 0,First,#,sde_Storm Pipe,ZDate,-1,-1;XYSource "XY Source" true true false 20 Text 0 0,First,#,sde_Storm Pipe,XYSource,0,19;XYDate "XY Date" true true false 8 Date 0 0,First,#,sde_Storm Pipe,XYDate,-1,-1;InstallDate "Install Date" true true false 8 Date 0 0,First,#,sde_Storm Pipe,InstallDate,-1,-1;CIPP "CIPP" true true false 1 Text 0 0,First,#,sde_Storm Pipe,CIPP,0,254;CIPPDate "CIPP Date" true true false 8 Date 0 0,First,#,sde_Storm Pipe,CIPPDate,-1,-1;CCTV "CCTV" true true false 1 Text 0 0,First,#,sde_Storm Pipe,CCTV,0,254;CCTVDate "CCTV Date" true true false 8 Date 0 0,First,#,sde_Storm Pipe,CCTVDate,-1,-1;Notes "Notes" true true false 99 Text 0 0,First,#,sde_Storm Pipe,Notes,0,98;OldID "Old ID" true true false 20 Text 0 0,First,#,sde_Storm Pipe,OldID,0,19;Neighborhood "Neighborhood" true true false 40 Text 0 0,First,#,sde_Storm Pipe,Neighborhood,0,39;DrainageBasin "Drainage Basin" true true false 40 Text 0 0,First,#,sde_Storm Pipe,DrainageBasin,0,39;created_user "created_user" false true false 255 Text 0 0,First,#,sde_Storm Pipe,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,sde_Storm Pipe,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,sde_Storm Pipe,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,sde_Storm Pipe,last_edited_date,-1,-1;GlobalID "GlobalID" false false true 38 GlobalID 0 0,First,#,sde_Storm Pipe,GlobalID,-1,-1;Assignment "Assignment" true true false 50 Text 0 0,First,#,sde_Storm Pipe,Assignment,0,49;FlushDate "FlushDate" true true false 8 Date 0 0,First,#,sde_Storm Pipe,FlushDate,-1,-1;Contract_Assignment "Contract_Assignment" true true false 75 Text 0 0,First,#,sde_Storm Pipe,Contract_Assignment,0,74;Contract_Status "Contract_Status" true true false 75 Text 0 0,First,#,sde_Storm Pipe,Contract_Status,0,74',
+        sort_field=None
+    ) 
+#structure_point
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="sde_Storm Structure",
+        out_features=os.path.join(full_p_storm,"storm_structure_point"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='StructureID "Structure ID" true true false 25 Text 0 0,First,#,sde_Storm Structure,StructureID,0,24;Type "Type" true true false 5 Text 0 0,First,#,sde_Storm Structure,Type,0,4;VDOTDIClass "VDOT DI Class" true true false 10 Text 0 0,First,#,sde_Storm Structure,VDOTDIClass,0,9;DIType "DI Type" true true false 2 Short 0 5,First,#,sde_Storm Structure,DIType,-1,-1;Owner "Owner" true true false 20 Text 0 0,First,#,sde_Storm Structure,Owner,0,19;Easement "Easement" true true false 3 Text 0 0,First,#,sde_Storm Structure,Easement,0,2;Status "Status" true true false 4 Text 0 0,First,#,sde_Storm Structure,Status,0,3;Size "Size" true true false 20 Text 0 0,First,#,sde_Storm Structure,Size,0,19;Material "Material" true true false 20 Text 0 0,First,#,sde_Storm Structure,Material,0,19;Depth "Depth" true true false 8 Double 8 38,First,#,sde_Storm Structure,Depth,-1,-1;Elevation "Elevation" true true false 8 Double 8 38,First,#,sde_Storm Structure,Elevation,-1,-1;ZSource "Z Source" true true false 20 Text 0 0,First,#,sde_Storm Structure,ZSource,0,19;ZDate "Z Date" true true false 8 Date 0 0,First,#,sde_Storm Structure,ZDate,-1,-1;XYSource "XY Source" true true false 20 Text 0 0,First,#,sde_Storm Structure,XYSource,0,19;XYDate "XY Date" true true false 8 Date 0 0,First,#,sde_Storm Structure,XYDate,-1,-1;LinesIn "Lines In" true true false 2 Short 0 5,First,#,sde_Storm Structure,LinesIn,-1,-1;LinesOut "Lines Out" true true false 2 Short 0 5,First,#,sde_Storm Structure,LinesOut,-1,-1;MS4 "MS4" true true false 5 Text 0 0,First,#,sde_Storm Structure,MS4,0,4;Notes "Notes" true true false 99 Text 0 0,First,#,sde_Storm Structure,Notes,0,98;Neighborhood "Neighborhood" true true false 40 Text 0 0,First,#,sde_Storm Structure,Neighborhood,0,39;DrainageBasin "Drainage Basin" true true false 40 Text 0 0,First,#,sde_Storm Structure,DrainageBasin,0,39;created_user "created_user" false true false 255 Text 0 0,First,#,sde_Storm Structure,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,sde_Storm Structure,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,sde_Storm Structure,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,sde_Storm Structure,last_edited_date,-1,-1;GlobalID "GlobalID" false false true 38 GlobalID 0 0,First,#,sde_Storm Structure,GlobalID,-1,-1;OutfallInspectionDate "Last Inspection Date" true true false 8 Date 0 0,First,#,sde_Storm Structure,OutfallInspectionDate,-1,-1;Contract_Assignment "Contract_Assignment" true true false 75 Text 0 0,First,#,sde_Storm Structure,Contract_Assignment,0,74;Contract_Status "Contract_Status" true true false 75 Text 0 0,First,#,sde_Storm Structure,Contract_Status,0,74',
+        sort_field=None
+    ) 
+  
+###############################################################################################################################        
+#WATER
+water_gdb = "Cville_Utilities_Water_"+current_date+".gdb"
+full_p_water = os.path.join(new_folder,water_gdb)
+#main_line
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="cvgis.CITY.water_main_line",
+        out_features=os.path.join(full_p_water,"water_main_line"),
+        where_clause="Status = 'Live' OR Status = 'LIVE' AND Owner = 'CITY'",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='Asset_ID "Pipe_ID" true true false 20 Text 0 0,First,#,cvgis.CITY.water_main_line,Asset_ID,0,19;Material "Material" true true false 20 Text 0 0,First,#,cvgis.CITY.water_main_line,Material,0,19;Diameter "Diameter" true true false 10 Text 0 0,First,#,cvgis.CITY.water_main_line,Diameter,0,9;Status "Status" true true false 10 Text 0 0,First,#,cvgis.CITY.water_main_line,Status,0,9',
+        sort_field=None
+    )
+#lateral_line
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="cvgis.CITY.water_lateral_line",
+        out_features=os.path.join(full_p_water,"water_lateral_line"),
+        where_clause="Owner = 'CITY'",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='Material "Material" true true false 50 Text 0 0,First,#,cvgis.CITY.water_lateral_line,Material,0,49;Address "Location" true true false 100 Text 0 0,First,#,cvgis.CITY.water_lateral_line,Address,0,99;Diameter "Size" true true false 10 Text 0 0,First,#,cvgis.CITY.water_lateral_line,Diameter,0,9;Line_Type "Line_Type" true true false 50 Text 0 0,First,#,cvgis.CITY.water_lateral_line,Line_Type,0,49;Asset_ID "Asset_ID" true true false 50 Text 0 0,First,#,cvgis.CITY.water_lateral_line,Asset_ID,0,49;Status "Status" true true false 10 Text 0 0,First,#,cvgis.CITY.water_lateral_line,Status,0,9',
+        sort_field=None
+    )
+#meter_point
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="cvgis.CITY.water_meter_point",
+        out_features=os.path.join(full_p_water,"water_meter_point"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='GPS_Date "GPS_Date" true true false 8 Date 0 0,First,#,cvgis.CITY.water_meter_point,GPS_Date,-1,-1;Street_Name "Street_Name" true true false 100 Text 0 0,First,#,cvgis.CITY.water_meter_point,Street_Name,0,99;Address "Address" true true false 100 Text 0 0,First,#,cvgis.CITY.water_meter_point,Address,0,99;Premise "Premise" true true false 15 Text 0 0,First,#,cvgis.CITY.water_meter_point,Premise,0,14;Device_Number "Device_Number" true true false 15 Text 0 0,First,#,cvgis.CITY.water_meter_point,Device_Number,0,14;ERT_Number "ERT_Number" true true false 15 Text 0 0,First,#,cvgis.CITY.water_meter_point,ERT_Number,0,14;Model "Model" true true false 25 Text 0 0,First,#,cvgis.CITY.water_meter_point,Model,0,24;Meter_Setter "Meter_Setter" true true false 10 Text 0 0,First,#,cvgis.CITY.water_meter_point,Meter_Setter,0,9;Bypass "Bypass" true true false 10 Text 0 0,First,#,cvgis.CITY.water_meter_point,Bypass,0,9;Check_Valve "Check_Valve" true true false 10 Text 0 0,First,#,cvgis.CITY.water_meter_point,Check_Valve,0,9;Traffic_Rated "Traffic_Rated" true true false 10 Text 0 0,First,#,cvgis.CITY.water_meter_point,Traffic_Rated,0,9;Box_Type "Box_Type" true true false 25 Text 0 0,First,#,cvgis.CITY.water_meter_point,Box_Type,0,24;Comments "Comments" true true false 256 Text 0 0,First,#,cvgis.CITY.water_meter_point,Comments,0,255;Diameter "Diameter" true true false 15 Text 0 0,First,#,cvgis.CITY.water_meter_point,Diameter,0,14;Install_Date "Install_Date" true true false 8 Date 0 0,First,#,cvgis.CITY.water_meter_point,Install_Date,-1,-1;House_Number "House_Number" true true false 15 Text 0 0,First,#,cvgis.CITY.water_meter_point,House_Number,0,14;House_Unit "House_Unit" true true false 25 Text 0 0,First,#,cvgis.CITY.water_meter_point,House_Unit,0,24;Last_Year_Tested "Last_Year_Tested" true true false 4 Text 0 0,First,#,cvgis.CITY.water_meter_point,Last_Year_Tested,0,3;created_user "created_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_meter_point,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_meter_point,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_meter_point,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_meter_point,last_edited_date,-1,-1;GlobalID "GlobalID" false false true 38 GlobalID 0 0,First,#,cvgis.CITY.water_meter_point,GlobalID,-1,-1;NewReadElectronic "NewReadElectronic" true true false 4 Long 0 10,First,#,cvgis.CITY.water_meter_point,NewReadElectronic,-1,-1;NewReadManual "NewReadManual" true true false 4 Long 0 10,First,#,cvgis.CITY.water_meter_point,NewReadManual,-1,-1;OldMeterLastRead "OldMeterLastRead" true true false 50 Text 0 0,First,#,cvgis.CITY.water_meter_point,OldMeterLastRead,0,49',
+        sort_field=None
+    )
+#valve_point
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="cvgis.CITY.water_valve_point",
+        out_features=os.path.join(full_p_water,"water_valve_point"),
+        where_clause="Status = 'Live' OR Status = 'LIVE' AND Owner = 'CITY'",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='Asset_ID "Asset_ID" true true false 20 Text 0 0,First,#,cvgis.CITY.water_valve_point,Asset_ID,0,19;SAP_ID "SAP_ID" true true false 15 Text 0 0,First,#,cvgis.CITY.water_valve_point,SAP_ID,0,14;Diameter "Diameter" true true false 10 Text 0 0,First,#,cvgis.CITY.water_valve_point,Diameter,0,9;Valve_Type "Valve_Type" true true false 50 Text 0 0,First,#,cvgis.CITY.water_valve_point,Valve_Type,0,49;Close_Direction "Close_Direction" true true false 10 Text 0 0,First,#,cvgis.CITY.water_valve_point,Close_Direction,0,9;Number_of_Turns "Number_of_Turns" true true false 10 Text 0 0,First,#,cvgis.CITY.water_valve_point,Number_of_Turns,0,9;Open_Close "Open_Close" true true false 10 Text 0 0,First,#,cvgis.CITY.water_valve_point,Open_Close,0,9;Comments "Comments" true true false 256 Text 0 0,First,#,cvgis.CITY.water_valve_point,Comments,0,255;Install_Date "Install_Date" true true false 8 Date 0 0,First,#,cvgis.CITY.water_valve_point,Install_Date,-1,-1;Owner "Owner" true true false 10 Text 0 0,First,#,cvgis.CITY.water_valve_point,Owner,0,9;Status "Status" true true false 10 Text 0 0,First,#,cvgis.CITY.water_valve_point,Status,0,9;Hydrant_Valve "Hydrant_Valve" true true false 10 Text 0 0,First,#,cvgis.CITY.water_valve_point,Hydrant_Valve,0,9;GPS_Date "GPS_Date" true true false 8 Date 0 0,First,#,cvgis.CITY.water_valve_point,GPS_Date,-1,-1;Krebs_Map_Page "Krebs_Map_Page" true true false 15 Text 0 0,First,#,cvgis.CITY.water_valve_point,Krebs_Map_Page,0,14;Krebs_Map_ID "Krebs_Map_ID" true true false 25 Text 0 0,First,#,cvgis.CITY.water_valve_point,Krebs_Map_ID,0,24;Valve_Operable "Valve_Operable" true true false 10 Text 0 0,First,#,cvgis.CITY.water_valve_point,Valve_Operable,0,9;Valve_Box_Top_Elevation "Valve_Box_Top_Elevation" true true false 8 Double 8 38,First,#,cvgis.CITY.water_valve_point,Valve_Box_Top_Elevation,-1,-1;Valve_Nut_Elevation "Valve_Nut_Elevation" true true false 8 Double 8 38,First,#,cvgis.CITY.water_valve_point,Valve_Nut_Elevation,-1,-1;Depth_To_Nut "Depth_To_Nut" true true false 8 Double 8 38,First,#,cvgis.CITY.water_valve_point,Depth_To_Nut,-1,-1;created_user "created_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_valve_point,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_valve_point,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_valve_point,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_valve_point,last_edited_date,-1,-1;GlobalID "GlobalID" false false true 38 GlobalID 0 0,First,#,cvgis.CITY.water_valve_point,GlobalID,-1,-1',
+        sort_field=None
+    )
+#hydrant_point
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="cvgis.CITY.water_hydrant_point",
+        out_features=os.path.join(full_p_water,"water_hydrant_point"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='Asset_ID "Asset ID" true true false 15 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,Asset_ID,0,14;Manufacturer "Manufacturer" true true false 15 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,Manufacturer,0,14;Elevation "Elevation" true true false 8 Double 8 38,First,#,cvgis.CITY.water_hydrant_point,Elevation,-1,-1;GPS_Date "GPS Date" true true false 8 Date 0 0,First,#,cvgis.CITY.water_hydrant_point,GPS_Date,-1,-1;Data_Source "Data Source" true true false 50 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,Data_Source,0,49;Install_Date "Install Date" true true false 12 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,Install_Date,0,11;Comments "Comments" true true false 200 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,Comments,0,199;SAP_Number "SAP Number" true true false 25 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,SAP_Number,0,24;Owner "Owner" true true false 10 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,Owner,0,9;Status "Status" true true false 25 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,Status,0,24;Location "Location" true true false 75 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,Location,0,74;ESN_Zone "ESN Zone" true true false 25 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,ESN_Zone,0,24;Static_Pressure "Static Pressure" true true false 2 Short 0 5,First,#,cvgis.CITY.water_hydrant_point,Static_Pressure,-1,-1;Angle "Angle" true true false 8 Double 8 38,First,#,cvgis.CITY.water_hydrant_point,Angle,-1,-1;created_user "created_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_hydrant_point,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_hydrant_point,last_edited_date,-1,-1;GlobalID "GlobalID" false false true 38 GlobalID 0 0,First,#,cvgis.CITY.water_hydrant_point,GlobalID,-1,-1;Flushing_Hydrant "Flushing Hydrant" true true false 5 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,Flushing_Hydrant,0,4;PaintingAssignment "PaintingAssignment" true true false 255 Text 0 0,First,#,cvgis.CITY.water_hydrant_point,PaintingAssignment,0,254;last_inspection_date "last_inspection_date" true true false 8 Date 0 0,First,#,cvgis.CITY.water_hydrant_point,last_inspection_date,-1,-1',
+        sort_field=None
+    )
+#main_node_point
+with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
+    arcpy.conversion.ExportFeatures(
+        in_features="cvgis.CITY.water_main_node_point",
+        out_features=os.path.join(full_p_water,"water_main_node_point"),
+        where_clause="",
+        use_field_alias_as_name="NOT_USE_ALIAS",
+        field_mapping='Asset_ID "Asset ID" true true false 20 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Asset_ID,0,19;Comments "Comments" true true false 100 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Comments,0,99;Diameter "Diameter" true true false 20 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Diameter,0,19;Node_Type "Node Type" true true false 25 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Node_Type,0,24;Angle "Angle" true true false 8 Double 8 38,First,#,cvgis.CITY.water_main_node_point,Angle,-1,-1;created_user "created_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_main_node_point,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_main_node_point,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_main_node_point,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_main_node_point,last_edited_date,-1,-1;GlobalID "GlobalID" false false true 38 GlobalID 0 0,First,#,cvgis.CITY.water_main_node_point,GlobalID,-1,-1;Status "Status" true true false 10 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Status,0,9',
+        sort_field=None
+    )
+############################################################################################################################
+############################################################################################################################
+#REMOVE ALL OF THE LAYERS THAT GET ADDED TO THE MAP
+
+aprx = arcpy.mp.ArcGISProject("CURRENT")
+# Get the active map
+map = aprx.activeMap
+# List of layer names to check
+layer_names_to_remove = ["gas_main_line", "gas_service_line", "sanitary_main_line", "sanitary_manhole_point", "storm_pipe_line", "storm_structure_point", "water_main_line", "water_lateral_line", "water_meter_point", "water_valve_point", "water_hydrant_point","water_main_node_point"]  # Replace with the list of layers you want to remove
+# Loop through the layers in reverse order for safe removal
+for layer in reversed(map.listLayers()):
+    if layer.name in layer_names_to_remove:
+        map.removeLayer(layer)
+# Save the project (optional)
+aprx.save()
+del aprx
