@@ -84,10 +84,10 @@ def download_most_recent_zip(sftp_host, sftp_port, sftp_username, sftp_password,
     
 
 # vars
-sftp_host = "acsadev.com"  # SFTP host address
+sftp_host = "xxxx.com"  # SFTP host address
 sftp_port = 22  # Default SFTP port
-sftp_username = "Charlottesville"  # SFTP username
-sftp_password = "Apr2$753Base"  # SFTP password
+sftp_username = "xxxx"  # SFTP username
+sftp_password = "xxxx"  # SFTP password
 sftp_remote_folder = "/GIS/City"  # remote folder on SFTP server
 ACSA_folder = "/GIS/ACSA"
 RWSA_folder = "/GIS/RWSA"
