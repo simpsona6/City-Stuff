@@ -6,8 +6,8 @@ import shutil
 import time
 from datetime import datetime
 
-#where you want to store other utilities downloaded from SFTP
-local_download_folder = r"\\metanoia\GeoData\DepartmentOfUtilities\RegionalUtilities"  # Replace with your local folder for download
+# location for utilities downloaded from SFTP
+local_download_folder = r"\\metanoia\GeoData\DepartmentOfUtilities\RegionalUtilities"  
 
 current_date = datetime.now().strftime("%Y%m%d")
 str_current_datetime = str(current_date)
@@ -16,14 +16,13 @@ export_fold = fold + str_current_datetime
 new_folder = os.path.join(r"\\metanoia\geodata\DepartmentOfUtilities\ACSA Exporter\Output_GDBs",export_fold)
 
 ###############################################################################################################################
-###############################################################################################################################
 
-# Check if the folder exists, and if not, create it
+# check for existing folder/create
 if not os.path.exists(new_folder):
     os.makedirs(new_folder)
-# Define a list of first letters for the geodatabase names
+# define a list of first letters for gdb names
 letters = ["Cville_Utilities_Gas_", "Cville_Utilities_Sanitary_", "Cville_Utilities_Storm_", "Cville_Utilities_Water_"]
-# Loop through each letter and create a geodatabase with the current date
+# loop and create gdb with date
 for letter in letters:
     gdb_name = f"{letter}{current_date}.gdb"
     gdb_path = os.path.join(new_folder, gdb_name)
@@ -35,7 +34,7 @@ for letter in letters:
         print(f"Geodatabase {gdb_name} already exists.")
 
 ###############################################################################################################################
-###############################################################################################################################                       
+                    
 #GAS
 gas_gdb = "Cville_Utilities_Gas_"+current_date+".gdb"
 full_p_gas = os.path.join(new_folder,gas_gdb)
@@ -194,19 +193,18 @@ with arcpy.EnvManager(maintainAttachments="NOT_MAINTAIN_ATTACHEMENTS"):
         field_mapping='Asset_ID "Asset ID" true true false 20 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Asset_ID,0,19;Comments "Comments" true true false 100 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Comments,0,99;Diameter "Diameter" true true false 20 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Diameter,0,19;Node_Type "Node Type" true true false 25 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Node_Type,0,24;Angle "Angle" true true false 8 Double 8 38,First,#,cvgis.CITY.water_main_node_point,Angle,-1,-1;created_user "created_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_main_node_point,created_user,0,254;created_date "created_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_main_node_point,created_date,-1,-1;last_edited_user "last_edited_user" false true false 255 Text 0 0,First,#,cvgis.CITY.water_main_node_point,last_edited_user,0,254;last_edited_date "last_edited_date" false true false 8 Date 0 0,First,#,cvgis.CITY.water_main_node_point,last_edited_date,-1,-1;GlobalID "GlobalID" false false true 38 GlobalID 0 0,First,#,cvgis.CITY.water_main_node_point,GlobalID,-1,-1;Status "Status" true true false 10 Text 0 0,First,#,cvgis.CITY.water_main_node_point,Status,0,9',
         sort_field=None
     )
-############################################################################################################################
-############################################################################################################################
+################################################################################################################################################################################
 #REMOVE ALL OF THE LAYERS THAT GET ADDED TO THE MAP
 
 aprx = arcpy.mp.ArcGISProject("CURRENT")
-# Get the active map
+# active map
 map = aprx.activeMap
-# List of layer names to check
+# list of layers to check
 layer_names_to_remove = ["gas_main_line", "gas_service_line", "sanitary_main_line", "sanitary_manhole_point", "storm_pipe_line", "storm_structure_point", "water_main_line", "water_lateral_line", "water_meter_point", "water_valve_point", "water_hydrant_point","water_main_node_point"]  # Replace with the list of layers you want to remove
-# Loop through the layers in reverse order for safe removal
+# loop through the layers in reverse order for safe removal
 for layer in reversed(map.listLayers()):
     if layer.name in layer_names_to_remove:
         map.removeLayer(layer)
-# Save the project (optional)
+# save 
 aprx.save()
 del aprx
