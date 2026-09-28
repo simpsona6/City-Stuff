@@ -1,0 +1,475 @@
+# computes InvertINElevation / InvertOUTElevation for a sanitary network (SanitaryMainLines) from MH rim elev (SanitaryManholes), and back-fills ManholeDepth
+
+# rim elev is source of truth from DEM
+# InvertIN, InvertOUT, and ManholeDepth all derived/adjusted for flow
+
+# addition: MINIMUM-COVER CHECK against terrain samples along each pipe (from a "Generate Points Along Lines") for potench low point in the middle of the run
+
+# 1. Push RimElevation from SanitaryManholes into
+#   UpstreamMHRimElevation / DownstreamMHRimElevation on the pipes
+# 2. Build a directed graph per Basin: pipe A -> pipe B when
+#   pipe A's DownstreamMH = pipe B's UpstreamMH.
+# 3. Topologically walk each basin's network (Kahn's algorithm), so a
+#   pipe is only processed once every pipe feeding into it has already
+#   been resolved (handles converging pipes)
+# 4. Headwater pipes (no upstream pipe in the basin) seeded from
+#   the upstream manhole: InvertIN = UpstreamMHRimElevation - ManholeDepth,
+#   falling back to a default minimum cover depth if ManholeDepth is
+#   null/zero.
+# 5. For every pipe: InvertOUT = InvertIN - max(length * MIN_SLOPE, MIN_DROP_AT_JUNCTION)
+# 6. MINIMUM-COVER CHECK: interpolate the pipe's own invert elevation at each point's
+#   position (as a fraction of the pipe's length from the upstream end)
+#   and compare it to (terrain elevation - MIN_COVER). If any sampled
+#   point along the pipe would violate minimum cover BOTH InvertIN and InvertOUT for that pipe
+#   are shifted down by the worst deficit found, preserving slope. Shift is applied before propagating InvertOUT downstream,
+#   so it cascades correctly through the rest of the network.
+# 7. Where pipes converge: next pipe's InvertIN = min(incoming InvertOUTs) - JUNCTION_LOSS
+# 8. REMOVE----Final check: each basin's topological headwater(s) should sit at/near
+#   that basin's known max elevation (BASIN_MAX_ELEVATION below). Large
+#   deviation usually means UpstreamMH/DownstreamMH got reversed
+#   somewhere in that basin, or the true headwater isn't connected.
+# 9. ManholeDepth recalced for every MH as RimElevation - (lowest invert elevation of any pipe touching it),
+#   and written back- depths change to make network work
+# 10. InvertINElevation / InvertOUTElevation are written back to the pipes.
+
+import arcpy
+from collections import defaultdict
+
+GDB_PATH = r"\\metanoia\GeoData\DepartmentOfUtilities\Simpson_A\gdbs\SanitarySystem.gdb"
+MANHOLE_FC_NAME = "SanitaryManholes"
+PIPE_FC_NAME = "SanitaryMains"
+POINTS_FC_NAME = "SanitaryMains_GeneratePointsAlongLines"
+
+# MH fields
+MH_ID_FIELD = "Asset_ID"
+MH_RIM_FIELD = "RimElevation"              # source of truth, from DEM
+MH_DEPTH_FIELD = "ManholeDepth"            # derived/adjusted
+
+# Pipe fields
+PIPE_UPSTREAM_MH_FIELD = "UpstreamMH"
+PIPE_DOWNSTREAM_MH_FIELD = "DownstreamMH"
+PIPE_UP_RIM_FIELD = "UpstreamMHRimElevation"
+PIPE_DOWN_RIM_FIELD = "DownstreamMHRimElevation"
+PIPE_INVERT_IN_FIELD = "InvertINElevation"
+PIPE_INVERT_OUT_FIELD = "InvertOUTElevation"
+PIPE_FALL_FIELD = "Fall"                   # Fall = InvertIN - InvertOUT; should be > 0 for correct flow direction
+PIPE_BASIN_FIELD = "Basin"
+PIPE_LENGTH_SOURCE = "SHAPE@LENGTH"       
+PIPE_DIAMETER_FIELD = "Diameter"                                                      
+                                          
+# Points-along-line fields (SanitaryMainLines_GeneratePointsAlongLines for now)
+POINT_ORIG_FID_FIELD = "ORIG_FID"          
+POINT_ELEV_FIELD = "DEMElev_Points"          
+
+# Design constants (generic defaults)
+MIN_SLOPE = 0.004              # minimum slope, ft/ft (0.4%)
+MIN_DROP_AT_JUNCTION = 0.10    # minimum fall through a straight-run manhole
+JUNCTION_LOSS = 0.05           # additional drop where pipes converge
+DEFAULT_MIN_DEPTH = 4.0        # fallback rim-to-invert depth at a headwater MH if ManholeDepth is null/0
+MIN_COVER = 3.0                # minimum earth cover (ft) required over the pipe along its whole length
+ROUND_DECIMALS = 2
+
+# Warning on computed ManholeDepth,flag manholes whose recomputed depth falls outside range for review
+MIN_MANHOLE_DEPTH = 2.0
+MAX_MANHOLE_DEPTH = 35.0
+
+# Sanity-check tolerance: how far a basin's topological headwater rim can sit below that basin's known max elevation before flagged as a likely reversed-direction or disconnected-headwater issue.
+BASIN_HEADWATER_TOLERANCE = 15.0
+
+# Known max ground elevation per basin
+# Basin field values are matched after stripping whitespace and a trailing "-", so "1-", "1", " 1 " all match key "1" below.
+BASIN_MAX_ELEVATION = {
+    "1": 410.196442, "2": 500.234131, "3": 453.659424, "4": 496.329315,
+    "5": 560.560547, "6": 545.224182, "7": 497.085297, "8": 576.897583,
+    "9": 584.284607, "10": 580.773638, "11": 493.340454, "12": 498.754913,
+    "13": 495.204742, "14": 535.475891, "15": 538.894653, "16": 546.554871,
+    "17": 614.68219, "18": 525.909424, "19": 554.000427, "20": 567.280945,
+    "21": 500.77655, "22": 601.544495, "23": 525.035278, "24": 397.318176,
+}
+
+# ---------------------------------------------------------------------------
+
+
+def normalize_basin_key(value):
+    # Handles text ("10", "10-", " 10 "), ints (10), and doubles/floats
+    # (10.0) -- GDB "Basin" fields are sometimes numeric, in which case
+    # arcpy hands back a Python float and str(10.0) would otherwise come
+    # out as "10.0" and silently fail to match TARGET_BASIN = "10".
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+    if isinstance(value, int):
+        return str(value)
+    return str(value).strip().rstrip("-").strip()
+
+
+def read_manholes(fc):
+    manholes = {}
+    fields = [MH_ID_FIELD, MH_RIM_FIELD, MH_DEPTH_FIELD, "SHAPE@XY"]
+    with arcpy.da.SearchCursor(fc, fields) as cur:
+        for mh_id, rim, depth, xy in cur:
+            manholes[mh_id] = {"rim": rim, "depth": depth, "xy": xy}
+    return manholes
+
+
+def update_rim_fields(pipe_fc, manholes):
+    # Copy RimElevation from manholes into the pipe's rim fields
+    fields = [PIPE_UPSTREAM_MH_FIELD, PIPE_DOWNSTREAM_MH_FIELD,
+              PIPE_UP_RIM_FIELD, PIPE_DOWN_RIM_FIELD]
+    updated, missing = 0, 0
+    with arcpy.da.UpdateCursor(pipe_fc, fields) as cur:
+        for row in cur:
+            up_mh, down_mh, up_rim, down_rim = row
+            up = manholes.get(up_mh)
+            down = manholes.get(down_mh)
+            if up is None or down is None:
+                missing += 1
+                continue
+            row[2] = up["rim"]
+            row[3] = down["rim"]
+            cur.updateRow(row)
+            updated += 1
+    arcpy.AddMessage(
+        f"Rim fields updated on {updated} pipes ({missing} skipped -- missing MH match)."
+    )
+
+
+def read_pipes(fc):
+    pipes = {}
+    fields = ["OID@", PIPE_UPSTREAM_MH_FIELD, PIPE_DOWNSTREAM_MH_FIELD,
+              PIPE_BASIN_FIELD, PIPE_LENGTH_SOURCE, "SHAPE@"]
+    if PIPE_DIAMETER_FIELD:
+        fields.append(PIPE_DIAMETER_FIELD)
+
+    with arcpy.da.SearchCursor(fc, fields) as cur:
+        for row in cur:
+            oid, up_mh, down_mh, basin, length, shape = row[:6]
+            diameter = float(row[6]) if PIPE_DIAMETER_FIELD and len(row) > 6 and row[6] not in (None, "") else None
+            pipes[oid] = {
+                "up_mh": up_mh, "down_mh": down_mh, "basin": basin,
+                "length": length if length else 0.0,
+                "shape": shape,
+                "diameter": diameter if diameter else 0.0,
+                "invert_in": None, "invert_out": None,
+                "terrain_stations": None,
+            }
+    return pipes
+
+
+def read_points(points_fc):
+    # Terrain elevation samples along each pipe, keyed by source pipe OID
+    points_by_pipe = defaultdict(list)
+    fields = [POINT_ORIG_FID_FIELD, POINT_ELEV_FIELD, "SHAPE@"]
+    skipped_null = 0
+    with arcpy.da.SearchCursor(points_fc, fields) as cur:
+        for orig_fid, elev, shape in cur:
+            if elev is None:
+                skipped_null += 1
+                continue
+            points_by_pipe[orig_fid].append({"elev": elev, "shape": shape})
+    if skipped_null:
+        arcpy.AddWarning(
+            f"{skipped_null} point(s) in {POINTS_FC_NAME} had a null "
+            f"'{POINT_ELEV_FIELD}' value and were skipped (likely a DEM "
+            f"no-data area or a point that fell outside the raster extent)."
+        )
+    arcpy.AddMessage(
+        f"Read terrain samples for {len(points_by_pipe)} pipe(s) from {POINTS_FC_NAME}."
+    )
+    return points_by_pipe
+
+
+def attach_terrain_stations(pipes, points_by_pipe, manholes):
+    # Each pipe: determine every sample point's fractional distance from the UPSTREAM (0.0) to DOWNSTREAM (1.0), using pipe geometry - NOT assuming the line was digitized directionally
+    attached, no_points, no_geom = 0, 0, 0
+    for oid, p in pipes.items():
+        pts = points_by_pipe.get(oid)
+        if not pts:
+            no_points += 1
+            continue
+        line = p.get("shape")
+        if line is None or line.length == 0:
+            no_geom += 1
+            continue
+
+        up_xy = manholes.get(p["up_mh"], {}).get("xy")
+        down_xy = manholes.get(p["down_mh"], {}).get("xy")
+        starts_at_upstream = True
+        if up_xy is not None and down_xy is not None:
+            first_pt = line.firstPoint
+            d_up = ((first_pt.X - up_xy[0]) ** 2 + (first_pt.Y - up_xy[1]) ** 2) ** 0.5
+            d_down = ((first_pt.X - down_xy[0]) ** 2 + (first_pt.Y - down_xy[1]) ** 2) ** 0.5
+            starts_at_upstream = d_up <= d_down
+
+        stations = []
+        for pt in pts:
+            frac_from_start = line.measureOnLine(pt["shape"], True)
+            frac_from_upstream = frac_from_start if starts_at_upstream else (1.0 - frac_from_start)
+            stations.append((frac_from_upstream, pt["elev"]))
+        stations.sort(key=lambda t: t[0])
+        p["terrain_stations"] = stations
+        attached += 1
+
+    arcpy.AddMessage(
+        f"Attached terrain stations to {attached} pipe(s) "
+        f"({no_points} with no matching points, {no_geom} with no usable geometry)."
+    )
+
+
+def build_network(pipes):
+    # Per basin: index of up_mh -> [successor pipe OIDs], plus the full OID list
+    by_basin = defaultdict(list)
+    for oid, p in pipes.items():
+        by_basin[p["basin"]].append(oid)
+
+    network = {}
+    for basin, oids in by_basin.items():
+        upstream_index = defaultdict(list)  # up_mh -> [pipe oids starting there]
+        for oid in oids:
+            upstream_index[pipes[oid]["up_mh"]].append(oid)
+        network[basin] = {"oids": oids, "upstream_index": upstream_index}
+    return network
+
+
+def _check_and_adjust_cover(oid, p, min_cover):
+    # Compares pipe's own straight-line invert profile against the sampled terrain along its length and shifts down (InvIN/InvOUT) as needed. Returns shift applied (0.0 if none was needed)
+    stations = p.get("terrain_stations")
+    if not stations:
+        return 0.0
+
+    invert_in, invert_out = p["invert_in"], p["invert_out"]
+    diameter = p.get("diameter", 0.0)
+
+    worst_shift = 0.0
+    worst_detail = None
+    for frac, terrain_elev in stations:
+        invert_at_pt = invert_in - frac * (invert_in - invert_out)
+        crown_at_pt = invert_at_pt + diameter
+        max_allowed_crown = terrain_elev - min_cover
+        deficit = crown_at_pt - max_allowed_crown
+        if deficit > worst_shift:
+            worst_shift = deficit
+            worst_detail = (frac, terrain_elev, crown_at_pt)
+
+    if worst_shift > 0.001:
+        p["invert_in"] = invert_in - worst_shift
+        p["invert_out"] = invert_out - worst_shift
+        frac, terrain_elev, crown_at_pt = worst_detail
+        station_ft = frac * p["length"]
+        #arcpy.AddWarning(
+        #    f"Pipe OID {oid}: insufficient cover ~{station_ft:.1f} ft from its "
+        #    f"upstream MH (terrain {terrain_elev:.2f}, pipe crown was {crown_at_pt:.2f}, "
+        #    f"needed <= {terrain_elev - min_cover:.2f} for {min_cover:.2f} ft cover). "
+        #    f"Lowered this pipe's InvertIN/InvertOUT by {worst_shift:.2f} ft to clear it "
+        #    f"along the full run."
+        #)
+    return worst_shift
+
+
+def compute_inverts(pipes, manholes, network):
+    cover_adjustments = 0
+    for basin, info in network.items():
+        oids = info["oids"]
+        upstream_index = info["upstream_index"]
+
+        indegree = {oid: 0 for oid in oids}
+        for oid in oids:
+            for succ_oid in upstream_index.get(pipes[oid]["down_mh"], []):
+                indegree[succ_oid] += 1
+
+        incoming_outs = defaultdict(list)
+        queue = [oid for oid in oids if indegree[oid] == 0]
+        headwaters = list(queue)
+        processed = 0
+
+        while queue:
+            oid = queue.pop(0)
+            p = pipes[oid]
+            preds = incoming_outs.get(oid, [])
+
+            if preds:
+                p["invert_in"] = min(preds) - (JUNCTION_LOSS if len(preds) > 1 else 0.0)
+            else:
+                mh = manholes.get(p["up_mh"])
+                if mh is None or mh["rim"] is None:
+                    arcpy.AddWarning(
+                        f"Pipe OID {oid} (basin {basin}): missing rim at upstream MH "
+                        f"'{p['up_mh']}' -- cannot seed invert, skipped."
+                    )
+                    continue
+                depth = mh["depth"] if mh["depth"] else DEFAULT_MIN_DEPTH
+                p["invert_in"] = mh["rim"] - depth
+
+            drop = max(p["length"] * MIN_SLOPE, MIN_DROP_AT_JUNCTION)
+            p["invert_out"] = p["invert_in"] - drop
+
+            # Min cover check against sampled terrain
+            # BEFORE invert_out is propagated so any downward shift cascades correctly through the network
+            if _check_and_adjust_cover(oid, p, MIN_COVER) > 0:
+                cover_adjustments += 1
+
+            processed += 1
+
+            for succ_oid in upstream_index.get(p["down_mh"], []):
+                incoming_outs[succ_oid].append(p["invert_out"])
+                indegree[succ_oid] -= 1
+                if indegree[succ_oid] == 0:
+                    queue.append(succ_oid)
+
+        if processed < len(oids):
+            stuck = [oid for oid in oids if pipes[oid]["invert_out"] is None]
+            arcpy.AddWarning(
+                f"Basin {basin}: {len(stuck)} pipe(s) not resolved -- check for a "
+                f"cycle or a pipe with no valid upstream/downstream match: {stuck}"
+            )
+
+        _check_headwaters_against_basin_max(basin, headwaters, pipes, manholes)
+
+    arcpy.AddMessage(
+        f"Minimum-cover check: {cover_adjustments} pipe(s) had InvertIN/InvertOUT "
+        f"lowered to maintain {MIN_COVER:.2f} ft cover along their full length."
+    )
+
+
+def _check_headwaters_against_basin_max(basin, headwater_oids, pipes, manholes):
+    key = normalize_basin_key(basin)
+    max_elev = BASIN_MAX_ELEVATION.get(key)
+    if max_elev is None:
+        arcpy.AddWarning(f"Basin '{basin}': no entry in BASIN_MAX_ELEVATION -- skipping headwater sanity check.")
+        return
+    for oid in headwater_oids:
+        p = pipes[oid]
+        mh = manholes.get(p["up_mh"])
+        if mh is None or mh["rim"] is None:
+            continue
+        #if max_elev - mh["rim"] > BASIN_HEADWATER_TOLERANCE:
+            #arcpy.AddWarning(
+            #    f"Basin '{basin}': headwater pipe OID {oid} starts at rim {mh['rim']:.2f}, "
+            #    f"which is {max_elev - mh['rim']:.2f} below the basin max elevation "
+            #    f"({max_elev:.2f}). This pipe may not actually be the true headwater -- "
+            #    f"check for a reversed UpstreamMH/DownstreamMH pair or a disconnected "
+            #    f"upper segment in this basin."
+            #)
+
+
+def compute_and_write_manhole_depths(manhole_fc, pipes, manholes):
+    # Recompute ManholeDepth from the final invert network and write itback
+    lowest_invert_at_mh = {}
+
+    def consider(mh_id, elev):
+        if elev is None:
+            return
+        cur = lowest_invert_at_mh.get(mh_id)
+        if cur is None or elev < cur:
+            lowest_invert_at_mh[mh_id] = elev
+
+    for p in pipes.values():
+        consider(p["up_mh"], p["invert_in"])
+        consider(p["down_mh"], p["invert_out"])
+
+    fields = [MH_ID_FIELD, MH_RIM_FIELD, MH_DEPTH_FIELD]
+    changed = 0
+    with arcpy.da.UpdateCursor(manhole_fc, fields) as cur:
+        for row in cur:
+            mh_id, rim, old_depth = row
+            lowest = lowest_invert_at_mh.get(mh_id)
+            if lowest is None or rim is None:
+                continue  # manhole not part of the resolved pipe network -- leave depth as-is
+            new_depth = round(rim - lowest, ROUND_DECIMALS)
+            if new_depth <= 0:
+                arcpy.AddWarning(
+                    f"Manhole '{mh_id}': computed depth {new_depth} is <= 0 "
+                    f"(rim {rim:.2f} vs lowest invert {lowest:.2f}) -- check inputs."
+                )
+                continue
+            if old_depth is None or abs(new_depth - old_depth) > 0.001:
+                row[2] = new_depth
+                cur.updateRow(row)
+                changed += 1
+    arcpy.AddMessage(f"ManholeDepth updated on {changed} manholes to match the resolved invert network.")
+
+
+def validate(pipes, manholes):
+    # Reversed/flat-flow check now lives in write_inverts() via the Fall field
+    # (Fall = InvertIN - InvertOUT, flagged when <= 0
+    pass
+
+
+def write_inverts(pipe_fc, pipes):
+    # Writes InvertIN/InvertOUT and Fall (= InvertIN - InvertOUT). Fall <= 0 is flagged as a likely reversed-flow indicator, since the network is built so InvertIN>InvertOUT
+    fields = ["OID@", PIPE_INVERT_IN_FIELD, PIPE_INVERT_OUT_FIELD, PIPE_FALL_FIELD]
+    written, reversed_flags = 0, 0
+    with arcpy.da.UpdateCursor(pipe_fc, fields) as cur:
+        for row in cur:
+            oid = row[0]
+            p = pipes.get(oid)
+            if p and p["invert_out"] is not None:
+                invert_in = round(p["invert_in"], ROUND_DECIMALS)
+                invert_out = round(p["invert_out"], ROUND_DECIMALS)
+                fall = round(invert_in - invert_out, ROUND_DECIMALS)
+                row[1] = invert_in
+                row[2] = invert_out
+                row[3] = fall
+                cur.updateRow(row)
+                written += 1
+                if fall <= 0:
+                    reversed_flags += 1
+                    arcpy.AddWarning(
+                        f"Pipe OID {oid}: Fall = {fall} (<= 0) -- InvertOUT is not below "
+                        f"InvertIN, which indicates reversed or flat flow on this pipe."
+                    )
+    arcpy.AddMessage(
+        f"InvertIN/InvertOUT/Fall written on {written} pipes "
+        f"({reversed_flags} flagged with Fall <= 0)."
+    )
+
+
+def main():
+    manhole_fc = f"{GDB_PATH}\\{MANHOLE_FC_NAME}"
+    pipe_fc = f"{GDB_PATH}\\{PIPE_FC_NAME}"
+    points_fc = f"{GDB_PATH}\\{POINTS_FC_NAME}"
+
+    arcpy.AddMessage("Reading manholes...")
+    manholes = read_manholes(manhole_fc)
+
+    arcpy.AddMessage("Syncing rim elevations onto pipes...")
+    update_rim_fields(pipe_fc, manholes)
+
+    arcpy.AddMessage("Reading pipes...")
+    pipes = read_pipes(pipe_fc)
+
+    if arcpy.Exists(points_fc):
+        arcpy.AddMessage("Reading terrain sample points along pipes...")
+        points_by_pipe = read_points(points_fc)
+        arcpy.AddMessage("Matching sample points to pipe stations...")
+        attach_terrain_stations(pipes, points_by_pipe, manholes)
+    else:
+        arcpy.AddWarning(
+            f"{points_fc} not found -- skipping minimum-cover check. Inverts will "
+            f"be computed from slope/junction rules only, with no check against "
+            f"terrain dips along the pipe runs."
+        )
+
+    arcpy.AddMessage("Building per-basin network...")
+    network = build_network(pipes)
+
+    arcpy.AddMessage("Computing inverts (also runs the cover check and basin-max-elevation sanity check)...")
+    compute_inverts(pipes, manholes, network)
+
+    arcpy.AddMessage("Recomputing manhole depths from the resolved network...")
+    compute_and_write_manhole_depths(manhole_fc, pipes, manholes)
+
+    arcpy.AddMessage("Validating...")
+    validate(pipes, manholes)
+
+    arcpy.AddMessage("Writing invert results to pipes...")
+    write_inverts(pipe_fc, pipes)
+
+    arcpy.AddMessage("Done.")
+
+
+if __name__ == "__main__":
+    main()
