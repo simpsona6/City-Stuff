@@ -1,0 +1,447 @@
+#intersection point layer from road centerlines ran in arcpro notebook
+
+#outputs
+#  Intersection_Nodes: one point per place where 3+ segment ends meet
+#  Intersections: nodes merged so a divided-road intersection is one point
+#  Centerline_Crossings_QA: places lines touch or cross WITHOUT a proper node (overpasses, or segments that were never split)
+
+import math
+import os
+from collections import defaultdict
+
+import arcpy
+
+INPUT_FC = r"\\metanoia\GeoData\ESRI\ArcSDE_connections\Connection to GISPRDDB direct connect.sde\cvgis.CITY.Transportation_Road\cvGIS.CITY.road_centerline"
+
+# streets if wanted
+NAME_FIELD = None
+
+# z-level for overpass intersections, not needed now 
+FROM_LEVEL_FIELD = None
+TO_LEVEL_FIELD = None
+
+# SQL filter to drop private roads later
+WHERE_CLAUSE = None
+
+# endpoints closer than this are treated as the same node
+SNAP_TOL_FT = 1.0
+
+# Nodes within this distance that share a street name are merged into one intersection (divided roads, offset medians). 0 = no merging.
+# Too large and close-together downtown intersections get merged; check results.
+MERGE_DIST_FT = 75.0
+MERGE_REQUIRE_SHARED_NAME = True
+
+# QA layer of crossings and unsplit T-junctions.
+RUN_CROSSING_QA = True
+
+# None = the project gdb
+OUTPUT_GDB = None
+
+OUT_NODES = "Intersection_Nodes"
+OUT_MERGED = "Intersections"
+OUT_QA = "Centerline_Crossings_QA"
+
+ADD_TO_MAP = True
+
+# =============================================================================
+
+NAME_CANDIDATES = ["FULLNAME", "FULL_NAME", "FULLSTNAME", "ST_FULLNAME",
+                   "STREET_NAME", "STREETNAME", "ST_NAME", "STNAME",
+                   "RD_NAME", "ROAD_NAME", "ROADNAME", "NAME", "LABEL"]
+FROM_LVL_CANDIDATES = ["FROMZLEV", "FROM_ZLEV", "F_ZLEV", "FROMELEV", "FROM_ELEV",
+                       "FROMLEVEL", "FROM_LEVEL", "F_ELEV", "ELEV_F"]
+TO_LVL_CANDIDATES = ["TOZLEV", "TO_ZLEV", "T_ZLEV", "TOELEV", "TO_ELEV",
+                     "TOLEVEL", "TO_LEVEL", "T_ELEV", "ELEV_T"]
+UNNAMED = "UNNAMED"
+
+
+def log(msg):
+    print(msg)
+    arcpy.AddMessage(msg)
+
+
+# ---------------------------------------------------------------- helpers ---
+
+def resolve_input(name):
+# Prefer the layer's data source so map selections and definition queries don't silently limit the run
+    try:
+        aprx = arcpy.mp.ArcGISProject("CURRENT")
+        for m in aprx.listMaps():
+            for lyr in m.listLayers():
+                if not lyr.isFeatureLayer:
+                    continue
+                if (lyr.name.lower() == name.lower()
+                        or lyr.dataSource.lower().endswith(name.lower())):
+                    return lyr.dataSource
+    except Exception:
+        pass
+    if arcpy.Exists(name):
+        return name
+    raise RuntimeError(
+        f"Can't find '{name}'. Add it to a map in this project, or set INPUT_FC "
+        "to the full path through your .sde connection file.")
+
+
+def find_field(fc, preferred, candidates):
+    fields = {f.name.upper().split(".")[-1]: f.name for f in arcpy.ListFields(fc)}
+    if preferred:
+        key = preferred.upper().split(".")[-1]
+        if key not in fields:
+            raise RuntimeError(f"Field '{preferred}' not found in {fc}. "
+                               f"Available: {sorted(fields.values())}")
+        return fields[key]
+    for c in candidates:
+        if c in fields:
+            return fields[c]
+    return None
+
+
+def get_output_gdb():
+    if OUTPUT_GDB:
+        return OUTPUT_GDB
+    try:
+        return arcpy.mp.ArcGISProject("CURRENT").defaultGeodatabase
+    except Exception:
+        raise RuntimeError("Not running inside ArcGIS Pro: set OUTPUT_GDB.")
+
+
+def clean_name(v):
+    if v is None:
+        return UNNAMED
+    s = " ".join(str(v).split())
+    return s if s else UNNAMED
+
+
+def unique_names(names):
+# Case-insensitive dedupe, alphabetical, UNNAMED last
+    seen = {}
+    for n in names:
+        seen.setdefault(n.upper(), n)
+    out = sorted((v for k, v in seen.items() if k != UNNAMED), key=str.upper)
+    if UNNAMED in seen:
+        out.append(UNNAMED)
+    return out
+
+
+def norm_level(v):
+    return 0 if v in (None, "") else v
+
+
+class UnionFind:
+    def __init__(self, n):
+        self.p = list(range(n))
+
+    def find(self, i):
+        while self.p[i] != i:
+            self.p[i] = self.p[self.p[i]]
+            i = self.p[i]
+        return i
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.p[rb] = ra
+
+
+def cluster(items, tol, can_link=None):
+#Group (x, y, level) items within tol of each other (same level only), using a grid hash so it stays fast on citywide data
+    uf = UnionFind(len(items))
+    grid = defaultdict(list)
+    tol2 = tol * tol
+    for i, (x, y, lvl) in enumerate(items):
+        cx, cy = int(math.floor(x / tol)), int(math.floor(y / tol))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in grid.get((cx + dx, cy + dy), ()):
+                    xj, yj, lj = items[j]
+                    if lj != lvl:
+                        continue
+                    if (x - xj) ** 2 + (y - yj) ** 2 > tol2:
+                        continue
+                    if can_link and not can_link(i, j):
+                        continue
+                    uf.union(i, j)
+        grid[(cx, cy)].append(i)
+    groups = defaultdict(list)
+    for i in range(len(items)):
+        groups[uf.find(i)].append(i)
+    return list(groups.values())
+
+
+def remove_from_maps(path):
+# drop map layers pointing at old output to avoid locks
+    try:
+        aprx = arcpy.mp.ArcGISProject("CURRENT")
+        for m in aprx.listMaps():
+            for lyr in m.listLayers():
+                if (lyr.supports("DATASOURCE")
+                        and os.path.normcase(lyr.dataSource) == os.path.normcase(path)):
+                    m.removeLayer(lyr)
+    except Exception:
+        pass
+
+
+def make_fc(gdb, name, sr, fields):
+    path = os.path.join(gdb, name)
+    if arcpy.Exists(path):
+        remove_from_maps(path)
+        try:
+            arcpy.management.Delete(path)
+        except arcpy.ExecuteError as e:
+            if "000496" in str(e):
+                raise RuntimeError(
+                    f"'{name}' has unsaved edits in this project. On the Edit tab, "
+                    "click Save or Discard, then run the script again.") from None
+            raise
+    arcpy.management.CreateFeatureclass(gdb, name, "POINT", spatial_reference=sr)
+    arcpy.management.AddFields(path, fields)
+    return path
+
+
+def leg_type(n):
+    return "3-LEG" if n == 3 else "4-LEG" if n == 4 else "MULTI-LEG" if n > 4 else "OTHER"
+
+
+def trunc(s, n):
+    return s if len(s) <= n else s[: n - 3] + "..."
+
+
+# ------------------------------------------------------------------- main ---
+
+def main():
+    arcpy.env.overwriteOutput = True
+
+    fc = resolve_input(INPUT_FC)
+    desc = arcpy.Describe(fc)
+    sr = desc.spatialReference
+    if desc.shapeType != "Polyline":
+        raise RuntimeError(f"{fc} is {desc.shapeType}, expected Polyline.")
+    if sr.type == "Geographic":
+        raise RuntimeError("Data is in a geographic coordinate system. Project it "
+                           "to a projected system (e.g. State Plane) first.")
+
+    ft_to_units = 0.3048 / sr.metersPerUnit
+    snap_tol = max(SNAP_TOL_FT * ft_to_units, 1e-6)
+    merge_tol = MERGE_DIST_FT * ft_to_units
+
+    name_fld = find_field(fc, NAME_FIELD, NAME_CANDIDATES)
+    from_fld = find_field(fc, FROM_LEVEL_FIELD, FROM_LVL_CANDIDATES)
+    to_fld = find_field(fc, TO_LEVEL_FIELD, TO_LVL_CANDIDATES)
+    if bool(from_fld) != bool(to_fld):
+        from_fld = to_fld = None
+
+    log(f"Input:        {fc}")
+    log(f"Units:        {sr.linearUnitName}  (snap {snap_tol:.3f}, merge {merge_tol:.1f})")
+    log(f"Name field:   {name_fld or 'NONE FOUND - set NAME_FIELD'}")
+    log(f"Level fields: {f'{from_fld} / {to_fld}' if from_fld else 'none (overpasses may show as nodes only if split there)'}")
+    log(f"Filter:       {WHERE_CLAUSE or 'none'}")
+
+    # 1. read segment endpoints ====================================================================================================
+    fields = ["OID@", "SHAPE@"]
+    if name_fld:
+        fields.append(name_fld)
+    if from_fld:
+        fields += [from_fld, to_fld]
+
+    ends = []  # (x, y, level, oid, name)
+    n_segs = n_multi = 0
+    with arcpy.da.SearchCursor(fc, fields, WHERE_CLAUSE) as cur:
+        for row in cur:
+            oid, geom = row[0], row[1]
+            if geom is None or geom.pointCount < 2:
+                continue
+            n_segs += 1
+            if geom.isMultipart:
+                n_multi += 1
+            name = clean_name(row[2]) if name_fld else UNNAMED
+            if from_fld:
+                flvl, tlvl = norm_level(row[-2]), norm_level(row[-1])
+            else:
+                flvl = tlvl = 0
+            for part in geom:
+                pts = [p for p in part if p]
+                if len(pts) < 2:
+                    continue
+                ends.append((pts[0].X, pts[0].Y, flvl, oid, name))
+                ends.append((pts[-1].X, pts[-1].Y, tlvl, oid, name))
+
+    log(f"Read {n_segs:,} segments ({n_multi:,} multipart), {len(ends):,} endpoints.")
+    if not ends:
+        raise RuntimeError("No segments read. Check INPUT_FC and WHERE_CLAUSE.")
+
+    # 2. cluster endpoints into nodes ==================================================================================================
+    groups = cluster([(e[0], e[1], e[2]) for e in ends], snap_tol)
+    ep_degree = [0] * len(ends)
+    degree_counts = defaultdict(int)
+    nodes = []
+    for g in groups:
+        deg = len(g)
+        degree_counts[min(deg, 5)] += 1
+        for i in g:
+            ep_degree[i] = deg
+        if deg < 3:
+            continue
+        x = sum(ends[i][0] for i in g) / deg
+        y = sum(ends[i][1] for i in g) / deg
+        names = unique_names(ends[i][4] for i in g)
+        real_names = [n for n in names if n != UNNAMED]
+        nodes.append({
+            "x": x, "y": y, "lvl": ends[g[0]][2], "degree": deg,
+            "oids": sorted({ends[i][3] for i in g}),
+            "names": names,
+            "same_name": "Y" if len(real_names) == 1 and UNNAMED not in names else "N",
+        })
+
+    log(f"Nodes: dead ends={degree_counts[1]:,}  pseudo-nodes (2)={degree_counts[2]:,}  "
+        f"3-leg={degree_counts[3]:,}  4-leg={degree_counts[4]:,}  5+={degree_counts[5]:,}")
+
+    # 3. merge nearby nodes (divided roads) ==================================================================
+    node_name_sets = [{n.upper() for n in nd["names"] if n != UNNAMED} for nd in nodes]
+
+    def can_link(i, j):
+        return (not MERGE_REQUIRE_SHARED_NAME) or bool(node_name_sets[i] & node_name_sets[j])
+
+    if merge_tol > 0 and nodes:
+        mgroups = cluster([(n["x"], n["y"], n["lvl"]) for n in nodes], merge_tol, can_link)
+    else:
+        mgroups = [[i] for i in range(len(nodes))]
+
+    merged = []
+    for cid, g in enumerate(sorted(mgroups, key=lambda g: (nodes[g[0]]["y"], nodes[g[0]]["x"])), 1):
+        oid_hits = defaultdict(int)
+        for i in g:
+            nodes[i]["cluster_id"] = cid
+            for o in nodes[i]["oids"]:
+                oid_hits[o] += 1
+        # Segments touching 2+ member nodes are internal (median links etc.)
+        legs = sum(1 for c in oid_hits.values() if c == 1) if len(g) > 1 else nodes[g[0]]["degree"]
+        names = unique_names(n for i in g for n in nodes[i]["names"])
+        merged.append({
+            "x": sum(nodes[i]["x"] for i in g) / len(g),
+            "y": sum(nodes[i]["y"] for i in g) / len(g),
+            "cid": cid, "node_count": len(g), "legs": legs,
+            "oids": sorted(oid_hits), "names": names,
+        })
+
+    # 4. write outputs =============================================================================
+    gdb = get_output_gdb()
+    log(f"Writing to {gdb}")
+
+    node_fields = [
+        ["INT_NAME", "TEXT", "Intersection Name", 255],
+        ["STREET_COUNT", "SHORT", "Distinct Streets"],
+        ["DEGREE", "SHORT", "Segment Ends at Node"],
+        ["LEG_TYPE", "TEXT", "Leg Type", 12],
+        ["SAME_NAME", "TEXT", "All Segments Same Name (Y/N)", 1],
+        ["Z_LEVEL", "TEXT", "Z Level", 20],
+        ["CLUSTER_ID", "LONG", "Merged Intersection ID"],
+        ["SEG_OIDS", "TEXT", "Centerline OIDs", 2000],
+        ["GRID_KEY", "TEXT", "Location Key", 40],
+    ]
+    nodes_path = make_fc(gdb, OUT_NODES, sr, node_fields)
+    with arcpy.da.InsertCursor(nodes_path, ["SHAPE@XY"] + [f[0] for f in node_fields]) as ic:
+        for n in nodes:
+            ic.insertRow([
+                (n["x"], n["y"]),
+                trunc(" & ".join(n["names"]), 255),
+                len([x for x in n["names"] if x != UNNAMED]),
+                n["degree"], leg_type(n["degree"]), n["same_name"], str(n["lvl"]),
+                n["cluster_id"],
+                trunc(",".join(map(str, n["oids"])), 2000),
+                f"{round(n['x'])}_{round(n['y'])}",
+            ])
+
+    merged_fields = [
+        ["INT_ID", "LONG", "Intersection ID"],
+        ["INT_NAME", "TEXT", "Intersection Name", 255],
+        ["STREET_COUNT", "SHORT", "Distinct Streets"],
+        ["LEGS", "SHORT", "Approach Legs (approx.)"],
+        ["LEG_TYPE", "TEXT", "Leg Type", 12],
+        ["NODE_COUNT", "SHORT", "Nodes Merged"],
+        ["SEG_OIDS", "TEXT", "Centerline OIDs", 2000],
+        ["GRID_KEY", "TEXT", "Location Key", 40],
+    ]
+    merged_path = make_fc(gdb, OUT_MERGED, sr, merged_fields)
+    with arcpy.da.InsertCursor(merged_path, ["SHAPE@XY"] + [f[0] for f in merged_fields]) as ic:
+        for m in merged:
+            ic.insertRow([
+                (m["x"], m["y"]), m["cid"],
+                trunc(" & ".join(m["names"]), 255),
+                len([x for x in m["names"] if x != UNNAMED]),
+                m["legs"], leg_type(m["legs"]), m["node_count"],
+                trunc(",".join(map(str, m["oids"])), 2000),
+                f"{round(m['x'])}_{round(m['y'])}",
+            ])
+
+    log(f"{OUT_NODES}: {len(nodes):,} nodes  ->  {OUT_MERGED}: {len(merged):,} intersections")
+    out_paths = [merged_path, nodes_path]
+
+    # 5. QA: crossings/no node ==================================================================
+    if RUN_CROSSING_QA:
+        log("Running crossing QA (can take a minute on large datasets)...")
+        lyr = arcpy.management.MakeFeatureLayer(fc, "cl_qa_lyr", WHERE_CLAUSE)
+        tmp = r"memory\cl_xings"
+        arcpy.analysis.Intersect([lyr], tmp, "ONLY_FID", output_type="POINT")
+
+        ep_grid = defaultdict(list)
+        for i, e in enumerate(ends):
+            ep_grid[(int(math.floor(e[0] / snap_tol)), int(math.floor(e[1] / snap_tol)))].append(i)
+
+        def near_endpoints(x, y):
+            cx, cy = int(math.floor(x / snap_tol)), int(math.floor(y / snap_tol))
+            hits = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for i in ep_grid.get((cx + dx, cy + dy), ()):
+                        if (ends[i][0] - x) ** 2 + (ends[i][1] - y) ** 2 <= snap_tol ** 2:
+                            hits.append(i)
+            return hits
+
+        qa = {}
+        with arcpy.da.SearchCursor(tmp, ["SHAPE@"]) as cur:
+            for (geom,) in cur:
+                if geom is None:
+                    continue
+                part = geom.getPart()
+                pts = [part] if isinstance(part, arcpy.Point) else [p for p in part if p]
+                for p in pts:
+                    key = (round(p.X / snap_tol), round(p.Y / snap_tol))
+                    if key in qa:
+                        continue
+                    hits = near_endpoints(p.X, p.Y)
+                    if not hits:
+                        qa[key] = (p.X, p.Y, "CROSSING_NO_NODE",
+                                   "Lines cross mid-segment: overpass/underpass, or missing split")
+                    elif all(ep_degree[i] == 1 for i in hits):
+                        qa[key] = (p.X, p.Y, "T_NOT_SPLIT",
+                                   "Segment ends on another line that isn't split there")
+
+        qa_fields = [["ISSUE", "TEXT", "Issue", 30],
+                     ["NOTE", "TEXT", "Note", 120],
+                     ["REVIEWED", "TEXT", "Reviewed (Y/N)", 1]]
+        qa_path = make_fc(gdb, OUT_QA, sr, qa_fields)
+        with arcpy.da.InsertCursor(qa_path, ["SHAPE@XY", "ISSUE", "NOTE", "REVIEWED"]) as ic:
+            for x, y, issue, note in qa.values():
+                ic.insertRow([(x, y), issue, note, "N"])
+        arcpy.management.Delete(tmp)
+        arcpy.management.Delete(lyr)
+        n_cross = sum(1 for v in qa.values() if v[2] == "CROSSING_NO_NODE")
+        log(f"{OUT_QA}: {n_cross:,} crossings without a node, "
+            f"{len(qa) - n_cross:,} unsplit T-junctions")
+        out_paths.append(qa_path)
+
+    # 6. add to map =================================================================================
+    if ADD_TO_MAP:
+        try:
+            m = arcpy.mp.ArcGISProject("CURRENT").activeMap
+            if m:
+                for p in reversed(out_paths):
+                    m.addDataFromPath(p)
+        except Exception:
+            pass
+
+    log("Done.")
+
+
+if __name__ == "__main__" or True:
+    main()
