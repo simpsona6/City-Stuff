@@ -1,0 +1,150 @@
+import arcpy
+import os
+
+
+MAP_NAME = "Map" 
+
+# clip boundary layer name or path if FC
+CLIP_BOUNDARY_LAYER = "HAZEN_09142026"  
+CLIP_BOUNDARY_PATH = None              
+
+# Output file gdb
+OUTPUT_GDB = r"\\metanoia\GeoData\DepartmentOfUtilities\Simpson_A\gdbs\xxxxxxxx.gdb"
+
+LAYERS_TO_CLIP = {
+ #   "Sanitary Main":          "SanitaryMain_clip",
+ #   "Manhole":                "Manhole_clip",
+ #   "Water Meter":            "WaterMeter_clip",
+ #   "Water Valve":            "WaterValve_clip",
+ #   "Hydrant":                "Hydrant_clip",
+ #   "Water Service":          "WaterService_clip",
+ #   "Water Main":             "WaterMain_clip",
+ #   "Storm Structure":        "StormStructure_clip",
+    "StormPipe":              "StormPipe_clip",
+ #   "Gas Meter":              "GasMeter_clip",
+ #   "Gas Main":               "GasMain_clip",
+ #   "Gas Service":            "GasService_clip",
+}
+
+FIELDS_TO_KEEP = {
+    "Sanitary Main":          ["Diameter", "Material", "AssetID", "Status"],
+    "Manhole":                ["Asset_ID"],
+    "Water Meter":            ["Address", "Diameter"],
+    "Water Valve":            ["Diameter", "Valve_Type" ],
+    "Hydrant":                ["Asset_ID", "Location"],
+    "Water Service":          ["Diameter", "Material"],
+    "Water Main":             ["Diameter", "Material", "Status"],
+    "Storm Structure":        ["Size", "Material", "StructureID", "Type", "Owner", "Neighborhood", "DrainageBasin"],
+    "Storm Pipe":             ["Size", "Material", "PipeID", "Type", "Owner", "Neighborhood", "DrainageBasin" ],
+    "Gas Meter":              ["ADDRESS", "STATUS", "SIZE"],
+    "Gas Main":               ["PIPE_SIZE", "WALL_DESCR", "STATUS"],
+    "Gas Service":            ["PIPE_SIZE", "WALL_DESCR", "STATUS"],
+}
+
+# ======================================================================================================================
+
+def get_map(aprx, map_name):
+    maps = [m for m in aprx.listMaps() if m.name == map_name]
+    if maps:
+        return maps[0]
+    if aprx.activeMap is not None:
+        arcpy.AddWarning(
+            f"Map '{map_name}' not found. Falling back to active map "
+            f"'{aprx.activeMap.name}'."
+        )
+        return aprx.activeMap
+    raise ValueError(
+        f"Map '{map_name}' not found and there is no active map. "
+        f"Available maps: {[m.name for m in aprx.listMaps()]}"
+    )
+
+
+def get_layer(map_obj, layer_name):
+    """Return a single layer object matched by name."""
+    matches = map_obj.listLayers(layer_name)
+    if not matches:
+        return None
+    return matches[0]
+
+
+def main():
+    aprx = arcpy.mp.ArcGISProject("CURRENT")
+    m = get_map(aprx, MAP_NAME)
+
+    # Resolve the clip boundary
+    if CLIP_BOUNDARY_LAYER:
+        clip_boundary = get_layer(m, CLIP_BOUNDARY_LAYER)
+        if clip_boundary is None:
+            raise ValueError(
+                f"Clip boundary layer '{CLIP_BOUNDARY_LAYER}' not found in "
+                f"map '{m.name}'. Layers present: "
+                f"{[l.name for l in m.listLayers()]}"
+            )
+    elif CLIP_BOUNDARY_PATH:
+        clip_boundary = CLIP_BOUNDARY_PATH
+    else:
+        raise ValueError("Set either CLIP_BOUNDARY_LAYER or CLIP_BOUNDARY_PATH.")
+
+    # check for output gdb
+    out_folder, out_gdb_name = os.path.split(OUTPUT_GDB)
+    if not arcpy.Exists(OUTPUT_GDB):
+        arcpy.AddMessage(f"Creating output geodatabase: {OUTPUT_GDB}")
+        arcpy.management.CreateFileGDB(out_folder, out_gdb_name)
+
+    arcpy.env.overwriteOutput = True
+
+    missing_layers = []
+    failed = []
+    succeeded = []
+
+    for layer_name, out_name in LAYERS_TO_CLIP.items():
+        lyr = get_layer(m, layer_name)
+        if lyr is None:
+            arcpy.AddWarning(f"SKIPPED - layer not found in map: '{layer_name}'")
+            missing_layers.append(layer_name)
+            continue
+
+        out_fc = os.path.join(OUTPUT_GDB, out_name)
+        try:
+            arcpy.AddMessage(f"Clipping '{layer_name}' -> {out_name} ...")
+            arcpy.analysis.Clip(
+                in_features=lyr,          # <-- the LAYER, not the SDE path:
+                clip_features=clip_boundary,  #     this is what honors the
+                out_feature_class=out_fc      #     layer's definition query
+            )  
+            # field sanitizing
+            keep_fields = FIELDS_TO_KEEP.get(layer_name, [])
+            existing_fields = {f.name for f in arcpy.ListFields(out_fc)}
+            valid_keep_fields = [f for f in keep_fields if f in existing_fields]
+            missing_keep_fields = [f for f in keep_fields if f not in existing_fields]
+            if missing_keep_fields:
+                arcpy.AddWarning(
+                    f"'{layer_name}': field(s) not found and skipped: "
+                    f"{missing_keep_fields}. Available fields: {sorted(existing_fields)}"
+                )
+            if valid_keep_fields:
+                arcpy.management.DeleteField(
+                    out_fc, valid_keep_fields, "KEEP_FIELDS"
+                )
+ 
+            succeeded.append(out_name)
+        except arcpy.ExecuteError:
+            arcpy.AddError(f"FAILED clipping '{layer_name}': {arcpy.GetMessages(2)}")
+            failed.append(layer_name)
+ 
+            succeeded.append(out_name)
+        except arcpy.ExecuteError:
+            arcpy.AddError(f"FAILED clipping '{layer_name}': {arcpy.GetMessages(2)}")
+            failed.append(layer_name)
+
+    # summary
+    arcpy.AddMessage("\n--- Summary ---")
+    arcpy.AddMessage(f"Succeeded ({len(succeeded)}): {succeeded}")
+    if missing_layers:
+        arcpy.AddWarning(f"Missing from map ({len(missing_layers)}): {missing_layers}")
+    if failed:
+        arcpy.AddError(f"Failed ({len(failed)}): {failed}")
+
+
+if __name__ == "__main__":
+    main()
